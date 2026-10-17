@@ -1,0 +1,32 @@
+name: Build unsigned IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - "prompts/**"
+      - ".github/workflows/build-ipa.yml"
+jobs:
+  ipa:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build for device (unsigned)
+        working-directory: ios
+        run: |
+          xcodebuild build -project IPhoneAgent.xcodeproj -scheme IPhoneAgent -configuration Release -sdk iphoneos -destination "generic/platform=iOS" -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+      - name: Package IPA
+        working-directory: ios
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Build/Products/Release-iphoneos/IPhoneAgent.app out/Payload/
+          cd out
+          zip -qry ESP32Agent-unsigned.ipa Payload
+          ls -lh ESP32Agent-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ESP32Agent-unsigned-ipa
+          path: ios/out/ESP32Agent-unsigned.ipa
+          retention-days: 30
