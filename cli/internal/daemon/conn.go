@@ -39,6 +39,7 @@ type Conn struct {
 	status        map[string]any
 	statusAt      time.Time
 	videoStatusAt time.Time // when the board last provided both AirPlay and freeze state
+	hidStatusAt   time.Time // when one report last carried both input mode and connection state
 
 	re               *video.Reassembler
 	videoGen         int // changes when old decoder output must no longer be published
@@ -153,6 +154,7 @@ func (c *Conn) detach(s *proto.Session, why error) {
 // resetSessionVideo must hold mu. The new session needs its own status and board clock.
 func (c *Conn) resetSessionVideo() {
 	c.status, c.statusAt, c.videoStatusAt, c.offset = map[string]any{}, time.Time{}, time.Time{}, nil
+	c.hidStatusAt = time.Time{}
 	c.restartingStream, c.streamPaused, c.waitingForReplay = false, false, false
 	c.restartAfter = time.Time{}
 	c.resetVideo()
@@ -263,6 +265,7 @@ type operationBinding struct {
 	session    *proto.Session
 	generation int
 	live       bool
+	refresh    bool
 }
 
 func (c *Conn) beginOperation(ctx context.Context, live bool) (context.Context, func(), error) {
@@ -304,11 +307,25 @@ func (c *Conn) operationError(ctx context.Context, line string) error {
 	if binding.session != c.sess {
 		return errVideoChanged
 	}
-	if line == "release" {
+	if line == "release" && !binding.refresh {
 		return nil
 	}
 	if binding.generation != c.videoGen {
 		return errVideoChanged
+	}
+	if binding.refresh {
+		if line != "move 1 0" && line != "move -1 0" {
+			return errors.New("screen refresh can only move the pointer by one unit")
+		}
+		now := time.Now()
+		if err := c.videoState(now); err != nil {
+			return err
+		}
+		hid := c.status["hid"]
+		if !currentVideoTime(now, c.hidStatusAt) || c.status["hidm"] != "ble" ||
+			(hid != "ok" && hid != "on" && hid != "connected") {
+			return errRefreshHID
+		}
 	}
 	if binding.live {
 		now := time.Now()
@@ -407,6 +424,14 @@ func (c *Conn) onStatus(b []byte, expected ...*proto.Session) {
 		c.status[k] = v
 	}
 	c.statusAt = now
+	_, hasHID := m["hid"]
+	_, hasHIDMode := m["hidm"]
+	if hasHID || hasHIDMode {
+		c.hidStatusAt = time.Time{}
+		if hasHID && hasHIDMode {
+			c.hidStatusAt = now
+		}
+	}
 	if _, hasAirPlay := m["ap"].(string); hasAirPlay {
 		if _, hasFreeze := m["fz"].(float64); hasFreeze {
 			c.videoStatusAt = now

@@ -33,6 +33,7 @@ var (
 	errActionFrame      = errors.New("no fresh screen after the action; navigation result is unverified")
 	errStreamPaused     = errors.New("desktop video is paused; run device restart-stream again")
 	errStreamRestarting = errors.New("desktop video restart or replay is in progress; retry the screenshot")
+	errRefreshHID       = errors.New("screen refresh requires a recent report of a connected BLE pointer")
 )
 
 func num(v any) float64 { f, _ := v.(float64); return f }
@@ -245,6 +246,39 @@ func (s *Server) restartStream(ctx context.Context, c *Conn) Response {
 	c.signalVideo()
 	c.mu.Unlock()
 	return ok(map[string]string{"message": "desktop stream restart requested; take a new screenshot to verify"})
+}
+
+func (s *Server) refreshScreen(ctx context.Context, c *Conn) Response {
+	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	ctx, done, err := c.beginOperation(ctx, false)
+	if err != nil {
+		return fail(err)
+	}
+	defer done()
+	binding := ctx.Value(operationKey{}).(operationBinding)
+	binding.refresh = true
+	ctx = context.WithValue(ctx, operationKey{}, binding)
+
+	c.mu.Lock()
+	ptr := c.ptr
+	c.mu.Unlock()
+	if ptr != nil {
+		ptr.Forget() // This relative move does not update the calibrated pointer's position.
+	}
+	if _, err := c.Send(ctx, "move 1 0"); err != nil {
+		return fail(fmt.Errorf("pointer refresh was not acknowledged: %w", err))
+	}
+	_, frameErr := c.waitFrame(ctx, binding.generation, time.Now(), 3*time.Second, false)
+	// The same binding checks the session, cancellation and live status again
+	// at the wire. It prevents restoring the pointer on a replacement link.
+	if _, err := c.Send(ctx, "move -1 0"); err != nil {
+		return fail(fmt.Errorf("pointer refresh moved the pointer, but the return move was not confirmed: %w", err))
+	}
+	if frameErr != nil {
+		return fail(fmt.Errorf("pointer refresh was requested, but a new frame was not verified: %w", frameErr))
+	}
+	return ok(map[string]string{"message": "fresh screen verified after pointer-only refresh"})
 }
 
 func encode(img image.Image, format string, quality int, scale float64, maxSize int) ([]byte, image.Rectangle, error) {

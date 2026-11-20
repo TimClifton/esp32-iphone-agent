@@ -36,6 +36,7 @@ const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board,
   screencapture --format h264|mjpeg   video to stdout
   device info                      board status
   device restart-stream            restart desktop video; verify with a new screenshot
+  device refresh-screen            briefly move the pointer and verify a new picture
   net                              the CLI's link (BLE or Wi-Fi) and the board's Wi-Fi
   net via auto|ble                 auto: move to Wi-Fi when this computer reaches the board (default)
   net join                         the board joins your Wi-Fi: asks for its name and password, sends them over
@@ -176,8 +177,8 @@ func (a *App) Run(args []string) int {
 		if len(pos) >= 2 && pos[0] == "send" { // undocumented: one raw board command, for debugging
 			return a.call(daemon.Request{Cmd: "send", Device: *dev, Text: strings.Join(pos[1:], " ")})
 		}
-		if len(pos) == 1 && pos[0] == "restart-stream" {
-			return a.call(daemon.Request{Cmd: "restart-stream", Device: *dev})
+		if len(pos) == 1 && (pos[0] == "restart-stream" || pos[0] == "refresh-screen") {
+			return a.call(daemon.Request{Cmd: pos[0], Device: *dev})
 		}
 		if len(pos) == 0 || pos[0] != "info" {
 			return a.fail(errUnsupported)

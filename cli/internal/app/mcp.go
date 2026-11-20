@@ -57,6 +57,8 @@ var (
 		{"press_button", "Press a hardware button. Only HOME (go to the Home Screen).",
 			schema([]string{"button"}, map[string]any{"button": map[string]any{"type": "string", "enum": []string{"HOME"}}})},
 		{"device_info", "Board status: mirroring (ap), video frozen (fz), app busy (busy), USB, BLE link.", schema(nil, map[string]any{})},
+		{"restart_stream", "Restart only the desktop video stream. An acknowledgment does not verify recovery. Take a fresh screenshot to verify.", schema(nil, map[string]any{})},
+		{"refresh_screen", "Prompt a still iPhone screen to send video using tiny pointer-only motion. Requires mirroring and a recent report of a connected BLE pointer. Verifies a fresh frame captured after the move without clicking or typing.", schema(nil, map[string]any{})},
 		{"phone_audio", "What the iPhone played in the last 30 s (a video, a call, an app's voice) as words, or why it can't be heard " +
 			"(listening off, the app not sharing, no Wi-Fi). The words can be partial or misheard.", schema(nil, map[string]any{})},
 	}
@@ -153,6 +155,10 @@ func (a *App) callTool(name string, args map[string]any) map[string]any {
 		req.Cmd, req.Text = "button", s("button")
 	case "device_info":
 		req.Cmd = "info"
+	case "restart_stream":
+		req.Cmd = "restart-stream"
+	case "refresh_screen":
+		req.Cmd = "refresh-screen"
 	case "phone_audio":
 		req.Cmd = "listen"
 	default:

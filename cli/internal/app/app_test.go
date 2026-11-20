@@ -80,6 +80,7 @@ func TestMCPHandshake(t *testing.T) {
 		t.Fatalf("got %d responses: %s", len(lines), buf.String())
 	}
 	if !strings.Contains(lines[0], `"protocolVersion":"2025-03-26"`) || !strings.Contains(lines[1], `"type_text"`) ||
+		!strings.Contains(lines[1], `"restart_stream"`) || !strings.Contains(lines[1], `"refresh_screen"`) ||
 		lines[2] != `{"jsonrpc":"2.0","id":3,"result":{}}` || !strings.Contains(lines[3], `-32601`) {
 		t.Fatalf("responses:\n%s", buf.String())
 	}
