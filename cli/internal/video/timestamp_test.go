@@ -19,6 +19,10 @@ func TestCachedGOPKeepsOriginalFrameTimes(t *testing.T) {
 	}
 	close(d.queue)
 	d.feed()
+	stats := d.Stats()
+	if stats.PicturesFed != 80 || stats.PendingTS != 80 || stats.LastInputTS != 179 || stats.BMPsRead != 0 {
+		t.Fatalf("missing or inconsistent replay counters: %+v", stats)
+	}
 	for i := 0; i < 80; i++ {
 		if got := d.popTS(); got != uint32(100+i) {
 			t.Fatalf("cached picture %d was relabeled as time %d", i, got)

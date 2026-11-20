@@ -28,9 +28,35 @@ type Decoder struct {
 	queue  chan AU
 	mu     sync.Mutex
 	ts     []uint32 // board times of AUs in flight, oldest first
+	stats  DecoderStats
 	stderr bytes.Buffer
 	done   chan struct{}
 	err    error
+}
+
+type DecoderStats struct {
+	PicturesFed uint64 `json:"pictures_fed"`
+	BMPsRead    uint64 `json:"bmps_read"`
+	QueueDepth  int    `json:"queue_depth"`
+	PendingTS   int    `json:"pending_timestamps"`
+	LastInputTS uint32 `json:"last_input_ts_ms"`
+	LastBMPTime uint32 `json:"last_assigned_output_ts_ms"`
+}
+
+func (d *Decoder) Stats() DecoderStats {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	stats := d.stats
+	stats.QueueDepth = len(d.queue)
+	stats.PendingTS = len(d.ts)
+	return stats
+}
+
+func (d *Decoder) recordBMP(ts uint32) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.stats.BMPsRead++
+	d.stats.LastBMPTime = ts
 }
 
 // FFmpeg finds the ffmpeg binary.
@@ -78,6 +104,7 @@ func NewDecoder(ffmpeg string, onFrame func(Frame), accept ...func(uint32) bool)
 			if err != nil {
 				break
 			}
+			d.recordBMP(ts)
 			if raw == nil {
 				continue
 			} // consume old GOP pictures without expanding or publishing them
@@ -113,6 +140,8 @@ func (d *Decoder) feed() {
 		} else {
 			d.mu.Lock()
 			d.ts = append(d.ts, au.TS)
+			d.stats.PicturesFed++
+			d.stats.LastInputTS = au.TS
 			// Preserve FIFO timestamps while a cached GOP catches up. Discarding the
 			// oldest timestamps labels old pictures as newly captured frames.
 			d.mu.Unlock()

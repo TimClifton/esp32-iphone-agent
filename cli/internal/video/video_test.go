@@ -99,6 +99,11 @@ func TestDecoderOneInOneOut(t *testing.T) {
 			if b := f.Img.Bounds(); b.Dx() != 160 || b.Dy() != 320 {
 				t.Fatalf("frame %d is %v", i, b)
 			}
+			stats := d.Stats()
+			if stats.PicturesFed != uint64(i+1) || stats.BMPsRead != uint64(i+1) ||
+				stats.LastInputTS != f.TS || stats.LastBMPTime != f.TS || stats.PendingTS != 0 || stats.QueueDepth != 0 {
+				t.Fatalf("frame %d has inconsistent decoder counts: %+v", i, stats)
+			}
 		case <-time.After(3 * time.Second):
 			t.Fatalf("AU %d gave no picture before the next one", i)
 		}

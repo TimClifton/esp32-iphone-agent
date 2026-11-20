@@ -10,6 +10,7 @@ import (
 	"hash/fnv"
 	"image"
 	"log"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,7 @@ type Conn struct {
 	streamPaused     bool
 	waitingForReplay bool
 	restartAfter     time.Time // successful stream-on acknowledgment in the current session
+	videoCounts      videoCounts
 	dec              *video.Decoder
 	ffmpeg           string
 	frame            image.Image
@@ -172,6 +174,10 @@ func (c *Conn) resetVideo() {
 func (c *Conn) clearFrame() {
 	c.frame, c.captured, c.updated, c.changed = nil, time.Time{}, time.Time{}, time.Time{}
 	c.frameHash, c.lastShot = 0, time.Time{}
+	c.videoCounts = videoCounts{}
+	if c.re != nil {
+		c.videoCounts.baseGaps = c.re.Gaps
+	}
 }
 
 func (c *Conn) signalVideo() {
@@ -441,6 +447,10 @@ func (c *Conn) onVideo(chunk []byte, gap bool, expected ...*proto.Session) {
 	if au == nil {
 		return
 	}
+	if au.Flags&(video.IDR|video.Config) != video.Config {
+		c.videoCounts.pictures++
+		c.videoCounts.latestAU = au.TS
+	}
 	switch {
 	case au.Flags&video.Config != 0:
 		c.config = au.Data
@@ -494,19 +504,45 @@ func streamActive(status map[string]any) bool {
 	return status["ap"] == "streaming" && status["fz"] == float64(0)
 }
 
+type videoCounts struct {
+	pictures  uint64
+	latestAU  uint32
+	published uint64
+	rejected  map[string]uint64
+	baseGaps  int
+}
+
 // captureTime must hold mu. An unknown or future timestamp cannot certify a live frame.
 func (c *Conn) captureTime(generation int, ts uint32, now time.Time) time.Time {
-	if generation != c.videoGen || ts == 0 || c.offset == nil || c.videoState(now) != nil {
-		return time.Time{}
+	switch {
+	case generation != c.videoGen:
+		return c.rejectFrame("generation")
+	case ts == 0 || c.offset == nil:
+		return c.rejectFrame("clock")
+	case c.videoState(now) != nil:
+		return c.rejectFrame("status")
 	}
 	if _, ok := c.status["up"]; !ok {
-		return time.Time{}
+		return c.rejectFrame("clock")
 	}
 	captured := time.UnixMilli(int64(ts) + *c.offset)
-	if !currentVideoTime(now, captured) || !captured.After(c.restartAfter) {
-		return time.Time{}
+	switch {
+	case captured.After(now):
+		return c.rejectFrame("future")
+	case !currentVideoTime(now, captured):
+		return c.rejectFrame("old")
+	case !captured.After(c.restartAfter):
+		return c.rejectFrame("pre_restart")
 	}
 	return captured
+}
+
+func (c *Conn) rejectFrame(reason string) time.Time {
+	if c.videoCounts.rejected == nil {
+		c.videoCounts.rejected = make(map[string]uint64)
+	}
+	c.videoCounts.rejected[reason]++
+	return time.Time{}
 }
 
 func currentVideoTime(now, at time.Time) bool {
@@ -537,6 +573,7 @@ func (c *Conn) onFrame(generation int, f video.Frame) {
 	}
 	c.frame, c.frameHash = f.Img, hash
 	c.waitingForReplay = false
+	c.videoCounts.published++
 	for ch := range c.frameSubs {
 		select {
 		case ch <- f.Img:
@@ -544,6 +581,36 @@ func (c *Conn) onFrame(generation int, f video.Frame) {
 		}
 	}
 	c.signalVideo()
+}
+
+// videoDiagnostics reports numeric decoder progress without retaining any frame content.
+func (c *Conn) videoDiagnostics() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	counts := c.videoCounts
+	out := map[string]any{
+		"generation": c.videoGen, "complete_picture_aus": counts.pictures,
+		"last_picture_au_ts_ms": counts.latestAU, "published_frames": counts.published,
+		"rejected_frames": maps.Clone(counts.rejected),
+	}
+	if c.re != nil {
+		out["reassembly_gaps"] = c.re.Gaps - counts.baseGaps
+	}
+	if !c.captured.IsZero() {
+		out["last_published_age_ms"] = now.Sub(c.captured).Milliseconds()
+	}
+	if c.offset != nil && counts.latestAU != 0 {
+		out["last_picture_au_age_ms"] = now.Sub(time.UnixMilli(int64(counts.latestAU) + *c.offset)).Milliseconds()
+	}
+	if c.dec != nil {
+		stats := c.dec.Stats()
+		out["decoder"] = stats
+		if c.offset != nil && stats.LastBMPTime != 0 {
+			out["decoder_assigned_output_age_ms"] = now.Sub(time.UnixMilli(int64(stats.LastBMPTime) + *c.offset)).Milliseconds()
+		}
+	}
+	return out
 }
 
 // Status returns a copy of the merged status and its age.

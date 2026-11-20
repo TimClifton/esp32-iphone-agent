@@ -181,6 +181,7 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 	case "info":
 		st, age := c.Status()
 		st["id"], st["name"] = c.ID, c.Name
+		st["video_diagnostics"] = c.videoDiagnostics()
 		l := s.Config.GetListen()
 		st["listen"] = map[string]any{"on": l.On, "mode": l.ListenMode()}
 		if age >= 0 {
