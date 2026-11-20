@@ -135,9 +135,7 @@ func (d *Decoder) popTS() uint32 {
 
 func (d *Decoder) feed() {
 	for au := range d.queue {
-		if au.Flags&(IDR|Config) == Config {
-			// parameter sets only: no picture comes out of it
-		} else {
+		if annexBHasPicture(au.Data) {
 			d.mu.Lock()
 			d.ts = append(d.ts, au.TS)
 			d.stats.PicturesFed++
@@ -152,6 +150,21 @@ func (d *Decoder) feed() {
 		}
 	}
 	d.in.Close()
+}
+
+// Parameter sets, delimiters and other non-VCL units reach ffmpeg, but they
+// cannot produce a picture and must not consume a slot in the timestamp FIFO.
+func annexBHasPicture(data []byte) bool {
+	for i := 0; i+4 < len(data); i++ {
+		if data[i] != 0 || data[i+1] != 0 || data[i+2] != 1 || data[i+3]&0x80 != 0 {
+			continue
+		}
+		switch data[i+3] & 0x1f {
+		case 1, 2, 3, 4, 5, 19, 20, 21: // H.264 video coding layer NAL units
+			return true
+		}
+	}
+	return false
 }
 
 // Write queues one AU. A full queue means ffmpeg fell far behind; the AU is dropped and false returned.

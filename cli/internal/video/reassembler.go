@@ -20,7 +20,8 @@ type AU struct {
 	Data  []byte
 }
 
-// Reassembler rebuilds access units from chunks; after a gap it waits for the next CONFIG/IDR.
+// Reassembler rebuilds access units from chunks. It forwards CONFIG while
+// waiting, but picture data must start at a complete IDR after startup or a gap.
 type Reassembler struct {
 	expect  int // next seq, -1 = unknown
 	cur     *AU
@@ -55,7 +56,6 @@ func (r *Reassembler) Feed(chunk []byte) *AU {
 			r.cur = nil
 			return nil
 		}
-		r.waiting = false
 		r.cur = &AU{Flags: flags, TS: binary.LittleEndian.Uint32(payload), Data: append([]byte{}, payload[4:]...)}
 	} else if r.cur != nil {
 		r.cur.Data = append(r.cur.Data, payload...)
@@ -64,6 +64,9 @@ func (r *Reassembler) Feed(chunk []byte) *AU {
 		au := r.cur
 		au.Flags |= flags
 		r.cur = nil
+		if au.Flags&IDR != 0 {
+			r.waiting = false
+		}
 		return au
 	}
 	return nil

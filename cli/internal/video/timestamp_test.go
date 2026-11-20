@@ -15,7 +15,7 @@ func (discardInput) Close() error                { return nil }
 func TestCachedGOPKeepsOriginalFrameTimes(t *testing.T) {
 	d := &Decoder{in: discardInput{}, queue: make(chan AU, 80)}
 	for i := 0; i < 80; i++ {
-		d.queue <- AU{TS: uint32(100 + i), Data: []byte{0, 0, 1, 1}}
+		d.queue <- AU{TS: uint32(100 + i), Data: []byte{0, 0, 1, 1, 0x80}}
 	}
 	close(d.queue)
 	d.feed()

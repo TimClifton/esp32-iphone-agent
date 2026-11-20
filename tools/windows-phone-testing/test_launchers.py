@@ -42,7 +42,7 @@ class LauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             original = Path(folder) / 'esp32agent.exe'
             original.touch()
-            with patch.object(session, 'CLI', original.with_name('esp32agent-local13.exe')), patch.object(session.subprocess, 'call') as command:
+            with patch.object(session, 'CLI', original.with_name('esp32agent-local14.exe')), patch.object(session.subprocess, 'call') as command:
                 with self.assertRaisesRegex(session.SessionError, 'Required phone CLI is missing'):
                     session.main(['--cli', 'version'])
                 command.assert_not_called()

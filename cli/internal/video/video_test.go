@@ -54,6 +54,39 @@ func TestReassembler(t *testing.T) {
 	}
 }
 
+func TestReassemblerWaitsForCompleteIDRAfterStartupAndLoss(t *testing.T) {
+	r := NewReassembler()
+	seq := uint16(0)
+	send := func(flags byte, data string) *AU {
+		unit := r.Feed(chunk(seq, flags, ts(100, data)))
+		seq++
+		return unit
+	}
+	for _, afterGap := range []bool{false, true} {
+		if afterGap {
+			r.Lost()
+		}
+		if au := send(Start|Config|End, "SPS"); au == nil {
+			t.Fatal("CONFIG was not forwarded")
+		}
+		if au := send(Start|End, "pre-IDR P"); au != nil {
+			t.Fatal("CONFIG incorrectly unlocked pre-IDR P-frames")
+		}
+		if au := send(Start|IDR, "incomplete IDR"); au != nil {
+			t.Fatal("incomplete IDR was published")
+		}
+		if au := send(Start|End, "pre-IDR P"); au != nil {
+			t.Fatal("incomplete IDR incorrectly unlocked P-frames")
+		}
+		if au := send(Start|IDR|End, "complete IDR"); au == nil {
+			t.Fatal("complete IDR was not published")
+		}
+		if au := send(Start|End, "P"); au == nil {
+			t.Fatal("P-frame after complete IDR was not published")
+		}
+	}
+}
+
 // splitAUs cuts an Annex-B stream at access unit delimiters (x264 aud=1).
 func splitAUs(b []byte) [][]byte {
 	var out [][]byte
