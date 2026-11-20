@@ -2,8 +2,10 @@ package pointer
 
 import (
 	"context"
+	"errors"
 	"image"
 	"image/color"
+	"slices"
 	"testing"
 	"time"
 )
@@ -69,5 +71,22 @@ func TestChangedSinceOnlyLooksAtFramesFromAfterTheLag(t *testing.T) {
 	}
 	if ChangeWait != 5*time.Second {
 		t.Fatalf("window %v", ChangeWait)
+	}
+}
+
+func TestGoHomeStopsFallbacksWhenDestinationIsUnverified(t *testing.T) {
+	for _, requireLive := range []bool{false, true} {
+		before := fill(200, 400, color.Gray{20})
+		switcher := fill(200, 400, color.Gray{150})
+		d := &fakeDevice{}
+		p := newPointer(t, d, &timedScreen{frames: []image.Image{before, switcher}})
+		p.RequireLive = requireLive
+		err := p.GoHome(context.Background())
+		if !errors.Is(err, ErrHomeUnverified) {
+			t.Fatalf("requireLive=%v: screen transition passed as confirmed Home: %v", requireLive, err)
+		}
+		if !slices.Equal(d.sent, []string{"homescreen"}) {
+			t.Fatalf("requireLive=%v: fallback triggered after an unknown screen transition: %q", requireLive, d.sent)
+		}
 	}
 }

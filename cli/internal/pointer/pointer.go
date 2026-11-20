@@ -750,9 +750,11 @@ func (p *Pointer) Type(ctx context.Context, text string) (string, error) {
 
 func (p *Pointer) Key(ctx context.Context, combo string) error { return p.send(ctx, "key %s", combo) }
 
-// GoHome goes to the Home Screen like the app's leaveApp: the consumer-control Home key, then Cmd+H, then the flick
-// up from the home bar, each until the screen really changes. The board acknowledges a key iOS ignores (seen on
-// an iPhone in a video app, 2026-10-21), so an "ok" alone proves nothing; without video the key's "ok" is all there is.
+var ErrHomeUnverified = errors.New("Home Screen arrival is unverified. Take a fresh screenshot to check")
+
+// GoHome attempts the Home key, Cmd+H and then a flick from the home bar.
+// A screen transition stops the fallbacks, but cannot identify the destination.
+// In the legacy headless path, a nil result acknowledges the request only.
 func (p *Pointer) GoHome(ctx context.Context) error {
 	link := p.dev.Links()
 	tries := []func() error{
@@ -787,14 +789,17 @@ func (p *Pointer) GoHome(ctx context.Context) error {
 			return nil // no video to check against: trust the Home key, and after Cmd+H still flick (as before)
 		}
 		if err == nil && before != nil && p.changedSince(ctx, before, sent) {
-			return p.ready(ctx, link)
+			if err := p.ready(ctx, link); err != nil {
+				return err
+			}
+			return fmt.Errorf("screen changed after Home input, but %w", ErrHomeUnverified)
 		}
 		last = err
 	}
 	if last != nil {
 		return last
 	}
-	return errors.New("the Home Screen did not come up (Home key, Cmd+H and the swipe up all left the screen as it was)")
+	return ErrHomeUnverified
 }
 
 func (p *Pointer) frame() image.Image {
