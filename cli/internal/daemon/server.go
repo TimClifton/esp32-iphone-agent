@@ -19,6 +19,7 @@ import (
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/ble"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/history"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/pointer"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/proto"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/video"
 )
@@ -36,6 +37,7 @@ type Request struct {
 	MaxSize int       `json:"max_size,omitempty"`
 	Aim     bool      `json:"aim,omitempty"`
 	Count   int       `json:"count,omitempty"` // taps in a row at one point (2: double tap)
+	Delta   int       `json:"delta,omitempty"` // vertical wheel delta
 }
 
 // Response is the CLI's JSON output, as mobilecli's: {"status":"ok","data":…} or {"status":"error","error":"…"}.
@@ -173,6 +175,9 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 	case "unpair":
 		return s.unpair(req.Device)
 	}
+	if req.Cmd == "scroll" && !pointer.ValidScrollDelta(req.Delta) {
+		return fail(pointer.ErrScrollDelta)
+	}
 	c, err := s.conn(ctx, req.Device)
 	if err != nil {
 		return fail(err)
@@ -196,7 +201,7 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 		return s.refreshScreen(ctx, c)
 	case "calibrate":
 		return s.calibrate(ctx, c)
-	case "tap", "longpress", "swipe", "text", "keys", "button":
+	case "tap", "longpress", "swipe", "scroll", "text", "keys", "button":
 		return s.io(ctx, c, req)
 	case "send":
 		return s.rawSend(ctx, c, req.Text)

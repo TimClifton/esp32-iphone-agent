@@ -416,13 +416,14 @@ const textChunk = 160
 func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
 	live := requireLive()
 	coordinates := req.Cmd == "tap" || req.Cmd == "longpress" || req.Cmd == "swipe"
-	ctx, done, err := c.beginOperation(ctx, live || coordinates)
+	needsFrame := live || coordinates || req.Cmd == "scroll"
+	ctx, done, err := c.beginOperation(ctx, needsFrame)
 	if err != nil {
 		return fail(err)
 	}
 	defer done()
 	var img image.Image
-	if live || coordinates {
+	if needsFrame {
 		if img, err = s.frame(ctx, c); err != nil {
 			return fail(err)
 		}
@@ -436,6 +437,8 @@ func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
 	p.RequireLive = live
 	err = func() error {
 		switch req.Cmd {
+		case "scroll":
+			return p.Scroll(ctx, req.Delta)
 		case "text":
 			typed, err := "", error(nil)
 			for rest := pointer.Typeable(req.Text); rest != "" && err == nil; {
@@ -493,6 +496,9 @@ func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
 		return fail(err)
 	}
 	out := map[string]string{"message": req.Cmd + " done"}
+	if req.Cmd == "scroll" {
+		out["message"] = "vertical scroll acknowledged; take a fresh screenshot to verify movement"
+	}
 	if req.Cmd == "text" && pointer.HasHan(req.Text) {
 		out["typed_as"] = pointer.Typeable(req.Text)
 		out["note"] = "needs the iPhone's Chinese (pinyin) keyboard; if letters appear, tap the globe key and type again"

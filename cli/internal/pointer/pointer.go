@@ -19,6 +19,7 @@ import (
 )
 
 const (
+	MaxScrollDelta  = 10
 	CalibrationMove = 200                    // mouse units moved diagonally for a one-point calibration
 	RehomeEvery     = 10                     // gestures between re-homing
 	Hold            = 250 * time.Millisecond // rest before lifting, so iOS adds no momentum
@@ -684,6 +685,20 @@ func (p *Pointer) LongPress(ctx context.Context, x, y float64, d time.Duration) 
 
 func (p *Pointer) Swipe(ctx context.Context, x1, y1, x2, y2 float64, hold bool) error {
 	return p.Drag(ctx, []Point{{x1, y1}, {x2, y2}}, hold)
+}
+
+var ErrScrollDelta = errors.New("scroll delta must be a nonzero integer from -10 to 10")
+
+func ValidScrollDelta(delta int) bool {
+	return delta != 0 && delta >= -MaxScrollDelta && delta <= MaxScrollDelta
+}
+
+// Scroll sends a single vertical mouse-wheel report.
+func (p *Pointer) Scroll(ctx context.Context, delta int) error {
+	if !ValidScrollDelta(delta) {
+		return ErrScrollDelta
+	}
+	return p.send(ctx, "scroll %d 0", delta)
 }
 
 // Drag presses at the first point, moves through the rest, releases: one continuous stroke. hold rests at the

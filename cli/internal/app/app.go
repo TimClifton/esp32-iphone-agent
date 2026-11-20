@@ -17,6 +17,7 @@ import (
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/ble"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/daemon"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/pointer"
 )
 
 // Version is set at build time (-ldflags "-X .../internal/app.Version=1.2.3").
@@ -30,6 +31,7 @@ const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board,
   io tap X,Y [--aim] [--count N]   coordinates are screenshot pixels; --count 2 double-taps
   io longpress X,Y [--duration MS]
   io swipe X1,Y1,X2,Y2
+  io scroll --delta N              vertical wheel, nonzero integer from -10 to 10
   io text 'TEXT'                   ASCII; Chinese is typed as pinyin
   io keys COMBO                    enter, esc, tab, backspace, space, up, cmd+a, ...
   io button HOME
@@ -236,16 +238,25 @@ func (a *App) io(fs *flag.FlagSet, dev *string, args []string) int {
 	aim := fs.Bool("aim", false, "find the pointer on screen and correct a miss before tapping")
 	ms := fs.Int("duration", 1000, "long press, ms")
 	count := fs.Int("count", 1, "taps in a row at the point (2: double tap)")
+	delta := fs.Int("delta", 0, "vertical mouse-wheel delta")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return a.fail(err)
 	}
 	if len(pos) == 0 {
-		return a.fail(errors.New("usage: esp32agent io tap|longpress|swipe|text|keys|button ..."))
+		return a.fail(errors.New("usage: esp32agent io tap|longpress|swipe|scroll|text|keys|button ..."))
 	}
 	sub, arg := pos[0], strings.Join(pos[1:], " ")
 	req := daemon.Request{Cmd: sub, Device: *dev, Aim: *aim, Ms: *ms, Count: *count, Text: arg}
 	switch sub {
+	case "scroll":
+		if len(pos) != 1 {
+			return a.fail(errors.New("usage: esp32agent io scroll --delta N"))
+		}
+		if !pointer.ValidScrollDelta(*delta) {
+			return a.fail(pointer.ErrScrollDelta)
+		}
+		req.Delta = *delta
 	case "tap", "longpress", "swipe":
 		n := 2
 		if sub == "swipe" {

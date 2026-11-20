@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"slices"
 
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/daemon"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/pointer"
 )
 
 // A small MCP server (JSON-RPC 2.0, one message per line on stdio) with the CLI's commands as tools.
@@ -50,6 +53,9 @@ var (
 			"duration_ms": map[string]any{"type": "integer", "description": "default 1000"}})},
 		{"swipe", "Swipe from x1, y1 to x2, y2 (rests at the end, so lists stop there).", schema([]string{"x1", "y1", "x2", "y2"},
 			map[string]any{"x1": numProp, "y1": numProp, "x2": numProp, "y2": numProp})},
+		{"scroll", "Send a vertical mouse-wheel delta. Take a fresh screenshot to verify that the list scrolled.",
+			schema([]string{"delta"}, map[string]any{"delta": map[string]any{"type": "integer", "minimum": -pointer.MaxScrollDelta,
+				"maximum": pointer.MaxScrollDelta, "not": map[string]any{"const": 0}}})},
 		{"type_text", "Type text into the focused field. ASCII only: Chinese is typed as pinyin (then commit a candidate with press_key space or a tap).",
 			schema([]string{"text"}, map[string]any{"text": map[string]any{"type": "string"}})},
 		{"press_key", "Press a key or combo: enter, esc, tab, backspace, space, up, down, left, right, cmd+a, shift+tab ...",
@@ -59,10 +65,12 @@ var (
 		{"device_info", "Board status: mirroring (ap), video frozen (fz), app busy (busy), USB, BLE link.", schema(nil, map[string]any{})},
 		{"restart_stream", "Restart only the desktop video stream. An acknowledgment does not verify recovery. Take a fresh screenshot to verify.", schema(nil, map[string]any{})},
 		{"refresh_screen", "Prompt a still iPhone screen to send video using tiny pointer-only motion. Requires mirroring and a recent report of a connected BLE pointer. Verifies a fresh frame captured after the move without clicking or typing.", schema(nil, map[string]any{})},
-		{"phone_audio", "What the iPhone played in the last 30 s (a video, a call, an app's voice) as words, or why it can't be heard " +
-			"(listening off, the app not sharing, no Wi-Fi). The words can be partial or misheard.", schema(nil, map[string]any{})},
 	}
+	phoneAudioTool = tool{"phone_audio", "What the iPhone played in the last 30 s (a video, a call, an app's voice) as words, or why it can't be heard " +
+		"(listening off, the app not sharing, no Wi-Fi). The words can be partial or misheard.", schema(nil, map[string]any{})}
 )
+
+func livePhoneMCP() bool { return os.Getenv("ESP32AGENT_REQUIRE_LIVE") == "1" }
 
 func (a *App) mcp(in io.Reader) int {
 	r := bufio.NewReaderSize(in, 1<<20)
@@ -103,7 +111,11 @@ func (a *App) handleRPC(m rpcMsg) *rpcMsg {
 	case "ping":
 		resp.Result = raw(map[string]any{})
 	case "tools/list":
-		resp.Result = raw(map[string]any{"tools": append(append([]tool{}, tools...), localTools...)})
+		available := tools
+		if !livePhoneMCP() {
+			available = append(append(slices.Clone(tools), phoneAudioTool), localTools...)
+		}
+		resp.Result = raw(map[string]any{"tools": available})
 	case "tools/call":
 		var p struct {
 			Name      string         `json:"name"`
@@ -130,7 +142,11 @@ func textResult(s string, isErr bool) map[string]any {
 }
 
 func (a *App) callTool(name string, args map[string]any) map[string]any {
-	if r, ok := a.callLocal(name, args); ok {
+	if livePhoneMCP() {
+		if !slices.ContainsFunc(tools, func(t tool) bool { return t.Name == name }) {
+			return textResult("tool is unavailable in the live phone testing profile", true)
+		}
+	} else if r, ok := a.callLocal(name, args); ok {
 		return r
 	}
 	f := func(k string) float64 { v, _ := args[k].(float64); return v }
@@ -147,6 +163,12 @@ func (a *App) callTool(name string, args map[string]any) map[string]any {
 		req.Cmd, req.Pts, req.Ms, req.Count = name, []float64{f("x"), f("y")}, int(f("duration_ms")), int(f("count"))
 	case "swipe":
 		req.Cmd, req.Pts = "swipe", []float64{f("x1"), f("y1"), f("x2"), f("y2")}
+	case "scroll":
+		delta := f("delta")
+		if delta != math.Trunc(delta) || delta == 0 || delta < -pointer.MaxScrollDelta || delta > pointer.MaxScrollDelta {
+			return textResult(pointer.ErrScrollDelta.Error(), true)
+		}
+		req.Cmd, req.Delta = "scroll", int(delta)
 	case "type_text":
 		req.Cmd, req.Text = "text", s("text")
 	case "press_key":
