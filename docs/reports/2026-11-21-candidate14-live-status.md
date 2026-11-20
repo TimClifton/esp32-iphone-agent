@@ -14,6 +14,18 @@ Source branch: `lab/windows-ble-pointer` in `TimClifton/esp32-iphone-agent`. Dec
 
 ## Remaining finite acceptance
 
+### Supervised continuation
+
+The owner set Red, enabled Increase Contrast and disabled Automatically Hide Pointer. A fresh screenshot verified those values; pointer size remained at its prior setting. Calibration then passed at 0.149%. During an explicitly untouched window, targeting the floating AssistiveTouch control opened its menu; targeting its visible Home control reached the actual Home screen. Luna independently verified that after-image. This is a verified visual Home route, not a repair of the native Home shortcut.
+
+From Home, a targeted Search tap and USB text entry produced exact `Settings`; selecting the observed Settings result opened the expected Accessibility page. Wheel deltas 3 and 10 produced only small movement and are not accepted as useful scrolling. A bounded drag from (350,500) to (350,1150) visibly scrolled to earlier Accessibility sections. No business application controls were used.
+
+Desktop stream restart then failed recovery: its request was acknowledged, but board status reported `fz=1`, GOP 4188261, overflow 1, generation 4 and zero published pictures. The subsequent pointer refresh refused input with an explicit phone-side Screen Mirroring restart instruction. Decoder timestamp correction does not repair this board replay/keyframe limitation. Do not advertise automatic recovery or repeatable unattended startup. Recovery remains a release limitation requiring a manual phone-side restart, and generic hardened promotion remains incomplete.
+
+The supervised console was released with an empty line and exited 0. Its controller process was absent on the subsequent check. Pairing and settings were preserved; no capture loop or phone controller remains active.
+
+Source commit `ec94528` additionally corrects Home reporting: a changed screen returns an unverified-destination error and stops fallbacks; pointer regressions and vet passed. It is pushed but has not been rebuilt into candidate14 or live-tested. Do not confuse the active candidate14 results with that newer source change.
+
 Verify reliable Home via an observed route, targeted navigation with the contrasting pointer, visible bounded wheel scrolling, current-runtime stream recovery, and clean release. Do not add an application-specific journey as a gate. Do not claim generic acceptance, CP migration, CP installation or an upstream merge before those results exist.
 
 The small model-tier check is in `2026-11-20-phone-tool-tier-check.md`: deterministic mechanics require no model; Luna passed simple state/text checks and Terra passed visual interpretation. No billing evidence establishes an absolute cheapest model.
