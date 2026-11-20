@@ -6,16 +6,27 @@ if ($LASTEXITCODE -ne 0 -or -not $basePython) { exit 1 }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $runFolder = Join-Path $PSScriptRoot ('phone-tests/' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Force $runFolder | Out-Null
-$statusDeadline = (Get-Date).AddSeconds(10)
+$statusDeadline = $null
+$transientRetryUsed = $false
 do {
-    $infoRaw = & (Join-Path $PSScriptRoot 'Use-RealBoard.ps1') device info
-    if ($LASTEXITCODE -ne 0) { throw 'Board status failed. No input was sent.' }
+    $infoRaw = & (Join-Path $PSScriptRoot 'Use-RealBoard.ps1') device info 2>&1
+    $boardExit = $LASTEXITCODE
+    if ($boardExit -ne 0) {
+        $diagnostic = $infoRaw | Out-String
+        if (-not $transientRetryUsed -and $diagnostic -match '(?i)session lost \(reconnect\)|setup time(?:out|d out)') {
+            $transientRetryUsed = $true
+            Start-Sleep -Milliseconds 300
+            continue
+        }
+        throw 'Board status failed. No input was sent.'
+    }
+    if ($null -eq $statusDeadline) { $statusDeadline = (Get-Date).AddSeconds(10) }
     $info = $infoRaw | ConvertFrom-Json
     if ($info.status -eq 'ok' -and $info.data.ap -eq 'streaming' -and $info.data.fz -ne 1 -and
         $null -ne $info.data.age_ms -and $info.data.age_ms -ge 0 -and $info.data.age_ms -le 2000 -and
         $info.data.hidm -eq 'ble' -and $info.data.hid -in @('on','ok','connected')) { break }
     Start-Sleep -Milliseconds 300
-} while ((Get-Date) -lt $statusDeadline)
+} while ($null -eq $statusDeadline -or (Get-Date) -lt $statusDeadline)
 if ($info.status -ne 'ok' -or $info.data.ap -ne 'streaming' -or $info.data.fz -eq 1 -or
     $null -eq $info.data.age_ms -or $info.data.age_ms -lt 0 -or $info.data.age_ms -gt 2000 -or
     $info.data.hidm -ne 'ble' -or $info.data.hid -notin @('on','ok','connected')) {
