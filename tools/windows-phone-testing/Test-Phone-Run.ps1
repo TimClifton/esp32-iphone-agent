@@ -21,8 +21,13 @@ if ($info.status -ne 'ok' -or $info.data.ap -ne 'streaming' -or $info.data.fz -e
     $info.data.hidm -ne 'ble' -or $info.data.hid -notin @('on','ok','connected')) {
     throw 'Phone not ready: verify Screen Mirroring is active and the ESP32 pointer is connected in AssistiveTouch. No input was sent.'
 }
-& (Join-Path $PSScriptRoot 'Use-RealBoard.ps1') screenshot --output (Join-Path $runFolder 'before.png')
-if ($LASTEXITCODE -ne 0) { throw 'Before screenshot failed. No input was sent.' }
+$screenDeadline = (Get-Date).AddSeconds(45)
+do {
+    & (Join-Path $PSScriptRoot 'Use-RealBoard.ps1') screenshot --output (Join-Path $runFolder 'before.png')
+    if ($LASTEXITCODE -eq 0) { break }
+    if ((Get-Date) -ge $screenDeadline) { throw 'Before screenshot failed. No input was sent.' }
+    Start-Sleep -Milliseconds 300
+} while ($true)
 if ($RunHomeCheck) {
     Write-Host 'Sending Home now. Please avoid touching the phone until the after image is captured.'
     & (Join-Path $PSScriptRoot 'Use-RealBoard.ps1') io button HOME
