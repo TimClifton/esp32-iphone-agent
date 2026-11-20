@@ -238,3 +238,59 @@ func TestCalibrateVerifiedRejectsMissingAndInaccurateObservation(t *testing.T) {
 		}
 	}
 }
+
+type glidingPointerScreen struct {
+	fakeScreen
+	cutoffs    []time.Duration
+	omitReturn bool
+}
+
+func (s *glidingPointerScreen) Fresh(_ context.Context, since time.Time, _ time.Duration) image.Image {
+	s.d.mu.Lock()
+	afterMove := since.Sub(s.d.moved)
+	s.d.mu.Unlock()
+	s.cutoffs = append(s.cutoffs, afterMove)
+	if afterMove < pointerGlide {
+		return frame(-100, -100) // first post-move frame, before the cursor appears at its destination
+	}
+	if s.omitReturn && len(s.cutoffs) == 3 {
+		return nil
+	}
+	return s.Frame()
+}
+
+func TestLiveWiggleRejectsEarlyFramesAndRequiresReturn(t *testing.T) {
+	for _, calibration := range []bool{true, false} {
+		for _, omitReturn := range []bool{false, true} {
+			ctx := context.Background()
+			d := &fakeDevice{}
+			if err := d.Send(ctx, "move 200 430"); err != nil {
+				t.Fatal(err)
+			}
+			s := &glidingPointerScreen{fakeScreen: fakeScreen{d}, omitReturn: omitReturn}
+			p := newPointer(t, d, s)
+			p.RequireLive = true
+			p.Span = &Span{W: 410, H: 870}
+			var pt Point
+			var ok bool
+			var err error
+			if calibration {
+				pt, ok, err = p.findPointer(ctx)
+			} else {
+				pt, ok, err = p.measure(ctx, 0.5, 0.5)
+			}
+			if err != nil || ok == omitReturn || len(s.cutoffs) != 3 {
+				t.Fatalf("calibration=%t omitReturn=%t point=%+v valid=%t cutoffs=%v error=%v",
+					calibration, omitReturn, pt, ok, s.cutoffs, err)
+			}
+			for _, cutoff := range s.cutoffs {
+				if cutoff < pointerGlide {
+					t.Fatalf("early frame eligible at %v", cutoff)
+				}
+			}
+			if ok && (math.Abs(pt.X-0.5) > AimTolerance || math.Abs(pt.Y-0.5) > AimTolerance) {
+				t.Fatalf("found the wrong pointer position: %+v", pt)
+			}
+		}
+	}
+}

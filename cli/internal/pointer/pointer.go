@@ -31,6 +31,8 @@ const (
 	// FreshWait: how long a wiggle waits for a frame captured after it. Over BLE, video yields to commands, and a
 	// frame often took over a second: calibration with 1 s saw no pointer (2026-11-06).
 	FreshWait = 3 * time.Second
+	// iOS animates placement after the board acknowledges the movement.
+	pointerGlide = 800 * time.Millisecond
 )
 
 // CalibrationStops are the distances at which calibration finds the pointer.
@@ -261,6 +263,13 @@ func (p *Pointer) calibrate(ctx context.Context) error {
 
 // findPointer wiggles the pointer and finds it anywhere on screen (the span may still be unknown).
 func (p *Pointer) findPointer(ctx context.Context) (Point, bool, error) {
+	if p.RequireLive {
+		before, after, back, err := p.settledWiggle(ctx, Nudge)
+		if err != nil || back == nil {
+			return Point{}, false, err
+		}
+		return calibrationPoint(before, after, back)
+	}
 	// iOS glides the pointer to a new spot over ~1 s, and the first frames arrive ~0.2 s late: a shorter wait took
 	// a frame from before the stop's move as "before" (2026-11-06).
 	p.screen.Settled(ctx, 400*time.Millisecond, 800*time.Millisecond, 3*time.Second)
@@ -282,11 +291,42 @@ func (p *Pointer) findPointer(ctx context.Context) (Point, bool, error) {
 		p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond)
 		back = p.screen.Frame()
 	}
+	return calibrationPoint(before, after, back)
+}
+
+func calibrationPoint(before, after, back image.Image) (Point, bool, error) {
 	pt, ok := LocateBack(before, after, back, Point{0.5, 0.5}, 0.025, Point{0.5, 0.5})
 	if !ok || pt.X <= 0.03 || pt.X >= 0.97 || pt.Y <= 0.03 || pt.Y >= 0.97 {
 		return Point{}, false, nil
 	}
 	return pt, true, nil
+}
+
+// settledWiggle starts just after an acknowledged placement move. Require a
+// fresh frame captured after the glide at each of the three pointer positions.
+func (p *Pointer) settledWiggle(ctx context.Context, nudge int) (before, after, back image.Image, err error) {
+	sample := func() image.Image {
+		return p.screen.Fresh(ctx, time.Now().Add(pointerGlide), pointerGlide+FreshWait)
+	}
+	before = sample()
+	if before == nil {
+		return nil, nil, nil, ctx.Err()
+	}
+	if err := p.send(ctx, "move %d 0", nudge); err != nil {
+		return nil, nil, nil, err
+	}
+	after = sample()
+	if err := p.send(ctx, "move %d 0", -nudge); err != nil {
+		return nil, nil, nil, err
+	}
+	if after == nil {
+		return nil, nil, nil, ctx.Err()
+	}
+	back = sample()
+	if back == nil || before.Bounds().Size() != after.Bounds().Size() || before.Bounds().Size() != back.Bounds().Size() {
+		return nil, nil, nil, ctx.Err()
+	}
+	return before, after, back, nil
 }
 
 // FinishCalibration: x, y is where the pointer ended up after `home` + `move 200 200` (one point).
@@ -368,7 +408,9 @@ func (p *Pointer) aim(ctx context.Context, x, y float64) error {
 	if p.pos != nil {
 		p.pos = &[2]int{p.pos[0] + mx, p.pos[1] + my}
 	}
-	p.screen.Settled(ctx, 300*time.Millisecond, 800*time.Millisecond, 1500*time.Millisecond)
+	if !p.RequireLive {
+		p.screen.Settled(ctx, 300*time.Millisecond, 800*time.Millisecond, 1500*time.Millisecond)
+	}
 	verified, visible, err := p.measure(ctx, x, y)
 	if err != nil {
 		return err
@@ -391,31 +433,34 @@ func (p *Pointer) measure(ctx context.Context, x, y float64) (Point, bool, error
 	if x >= 0.9 { // stay clear of the screen edge
 		nudge = -Nudge
 	}
-	p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond) // pointer at rest
-	if p.RequireLive && !p.screen.Live() {
-		return Point{}, false, errors.New("live screen lost during pointer measurement")
-	}
-	before, sent := p.screen.Frame(), time.Now()
-	if err := p.send(ctx, "move %d 0", nudge); err != nil {
-		return Point{}, false, err
-	}
-	after := p.screen.Fresh(ctx, sent, 1200*time.Millisecond)
-	if after != nil {
-		p.screen.Settled(ctx, 100*time.Millisecond, 50*time.Millisecond, 400*time.Millisecond)
-		if p.RequireLive {
-			after = p.screen.Fresh(ctx, sent, 1200*time.Millisecond)
-		} else {
+	var before, after, back image.Image
+	if p.RequireLive {
+		var err error
+		before, after, back, err = p.settledWiggle(ctx, nudge)
+		if err != nil || back == nil {
+			return Point{}, false, err
+		}
+	} else {
+		p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond) // pointer at rest
+		var sent time.Time
+		before, sent = p.screen.Frame(), time.Now()
+		if err := p.send(ctx, "move %d 0", nudge); err != nil {
+			return Point{}, false, err
+		}
+		after = p.screen.Fresh(ctx, sent, 1200*time.Millisecond)
+		if after != nil {
+			p.screen.Settled(ctx, 100*time.Millisecond, 50*time.Millisecond, 400*time.Millisecond)
 			after = p.screen.Frame()
 		}
-	}
-	if err := p.send(ctx, "move %d 0", -nudge); err != nil {
-		return Point{}, false, err
+		if err := p.send(ctx, "move %d 0", -nudge); err != nil {
+			return Point{}, false, err
+		}
 	}
 	shift := float64(nudge) / float64(p.Span.W)
-	if pt, ok := Locate(before, after, Point{x, y}, shift, Point{0.12, 0.08}); ok {
+	if pt, ok := LocateBack(before, after, back, Point{x, y}, shift, Point{0.12, 0.08}); ok {
 		return pt, true, nil
 	}
-	pt, ok := Locate(before, after, Point{0.5, 0.5}, shift, Point{0.5, 0.5})
+	pt, ok := LocateBack(before, after, back, Point{0.5, 0.5}, shift, Point{0.5, 0.5})
 	return pt, ok, nil
 }
 
