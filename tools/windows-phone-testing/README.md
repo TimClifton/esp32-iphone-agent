@@ -1,6 +1,6 @@
 # Local Windows real-iPhone testing candidate 9
 
-Candidate 9 adds `device restart-stream` for an explicitly requested desktop-video recovery test. This controls the CLI video feed and decoder, not the iPhone's Screen Mirroring UI. A command acknowledgement is not fresh-image acceptance; verify a subsequent screenshot. Pairing and pointer mode are preserved. The recovery command is not live accepted yet.
+Candidate 9 adds `device restart-stream` for an explicitly requested desktop-video recovery test. This controls the CLI video feed and decoder, not the iPhone's Screen Mirroring UI. A command acknowledgement is not fresh-image acceptance; verify a subsequent screenshot. Pairing and pointer mode are preserved. One live recovery passed after roughly 35 seconds and the owner confirmed its image matched the physical phone; see `docs/reports/2026-11-20-desktop-stream-reconnect.md`. This does not establish repeatable fast recovery. General CP promotion remains conditional.
 
 Candidate 8 aligns the live Home gesture with the upstream iPhone implementation: verified bottom-edge placement, bottom clamp, then one firmware `flick` command. It preserves cancellation/link checks and refuses unsupported firmware instead of falling back to the stroke that opened the app switcher. Candidate 7 verified a precise Search tap on the physical phone; text, Home and cold-start reliability remain unaccepted pending further live checks.
 
