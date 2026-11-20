@@ -11,7 +11,9 @@ do {
     $infoRaw = & (Join-Path $PSScriptRoot 'Use-RealBoard.ps1') device info
     if ($LASTEXITCODE -ne 0) { throw 'Board status failed. No input was sent.' }
     $info = $infoRaw | ConvertFrom-Json
-    if ($null -ne $info.data.age_ms) { break }
+    if ($info.status -eq 'ok' -and $info.data.ap -eq 'streaming' -and $info.data.fz -ne 1 -and
+        $null -ne $info.data.age_ms -and $info.data.age_ms -ge 0 -and $info.data.age_ms -le 2000 -and
+        $info.data.hidm -eq 'ble' -and $info.data.hid -in @('on','ok','connected')) { break }
     Start-Sleep -Milliseconds 300
 } while ((Get-Date) -lt $statusDeadline)
 if ($info.status -ne 'ok' -or $info.data.ap -ne 'streaming' -or $info.data.fz -eq 1 -or
