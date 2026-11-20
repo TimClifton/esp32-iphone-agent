@@ -378,50 +378,62 @@ func (p *Pointer) point(ctx context.Context, x, y float64, aim bool) error {
 // aim is the closed loop: find the real pointer on screen, fix a miss, and learn the error for later moves.
 func (p *Pointer) aim(ctx context.Context, x, y float64) error {
 	link := p.link
-	if p.screen == nil || !p.screen.Live() || p.dev.Links() != link {
+	if p.screen == nil {
 		return errors.New("pointer verification lost its live connection; no click sent")
 	}
-	found, ok, err := p.measure(ctx, x, y)
-	if err != nil {
-		return err
+	maxCorrections := 1
+	if p.RequireLive {
+		maxCorrections = 3
 	}
-	if !ok {
-		p.Log(fmt.Sprintf("aim (%.3f, %.3f): pointer not found", x, y))
-		return ErrNotFound
-	}
-	if math.Max(math.Abs(found.X-x), math.Abs(found.Y-y)) <= MaxMiss { // learn from normal drift only
-		p.remember("x", [2]float64{p.Fix(x, "x"), found.X})
-		p.remember("y", [2]float64{p.Fix(y, "y"), found.Y})
-		p.save()
-	}
-	if math.Abs(found.X-x) <= AimTolerance && math.Abs(found.Y-y) <= AimTolerance {
-		if !p.screen.Live() || p.dev.Links() != link {
-			return errors.New("connection changed during pointer verification; no click sent")
+	check := func() error {
+		if err := p.ready(ctx, link); err != nil {
+			return err
+		}
+		if !p.RequireLive && !p.screen.Live() {
+			return errors.New("pointer verification lost its live screen; no click sent")
 		}
 		return nil
 	}
-	mx := int(math.RoundToEven((x - found.X) * float64(p.Span.W)))
-	my := int(math.RoundToEven((y - found.Y) * float64(p.Span.H)))
-	if err := p.moveXY(ctx, mx, my); err != nil { // fix this miss right away
-		return err
+	for correction := 0; ; correction++ {
+		if err := check(); err != nil {
+			return err
+		}
+		found, ok, err := p.measure(ctx, x, y)
+		if err != nil {
+			return err
+		}
+		if err := check(); err != nil {
+			return err
+		}
+		if !ok {
+			p.Log(fmt.Sprintf("aim (%.3f, %.3f): pointer not found", x, y))
+			return ErrNotFound
+		}
+		residual := math.Max(math.Abs(found.X-x), math.Abs(found.Y-y))
+		if correction == 0 && residual <= MaxMiss { // learn only from the original placement
+			p.remember("x", [2]float64{p.Fix(x, "x"), found.X})
+			p.remember("y", [2]float64{p.Fix(y, "y"), found.Y})
+			p.save()
+		}
+		if acceptableResidual(residual) {
+			return nil
+		}
+		if correction == maxCorrections {
+			return fmt.Errorf("corrected pointer position is unverified: target (%.4f, %.4f), observed (%.4f, %.4f), residual %.4f; no click sent",
+				x, y, found.X, found.Y, residual)
+		}
+		mx := int(math.RoundToEven((x - found.X) * float64(p.Span.W)))
+		my := int(math.RoundToEven((y - found.Y) * float64(p.Span.H)))
+		if err := p.moveXY(ctx, mx, my); err != nil {
+			return err
+		}
+		if p.pos != nil {
+			p.pos = &[2]int{p.pos[0] + mx, p.pos[1] + my}
+		}
+		if !p.RequireLive {
+			p.screen.Settled(ctx, 300*time.Millisecond, 800*time.Millisecond, 1500*time.Millisecond)
+		}
 	}
-	if p.pos != nil {
-		p.pos = &[2]int{p.pos[0] + mx, p.pos[1] + my}
-	}
-	if !p.RequireLive {
-		p.screen.Settled(ctx, 300*time.Millisecond, 800*time.Millisecond, 1500*time.Millisecond)
-	}
-	verified, visible, err := p.measure(ctx, x, y)
-	if err != nil {
-		return err
-	}
-	if !visible {
-		return ErrNotFound
-	}
-	if !p.screen.Live() || p.dev.Links() != link || math.Abs(verified.X-x) > AimTolerance || math.Abs(verified.Y-y) > AimTolerance {
-		return errors.New("corrected pointer position is unverified; no click sent")
-	}
-	return nil
 }
 
 // measure wiggles the pointer and finds it on screen, near the target first, then anywhere.

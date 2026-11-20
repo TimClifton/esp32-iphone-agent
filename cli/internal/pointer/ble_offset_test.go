@@ -2,11 +2,13 @@ package pointer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"math"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -349,5 +351,67 @@ func TestLiveHomeSwipeUsesOneAtomicFlick(t *testing.T) {
 				t.Fatalf("unexpected number of flicks: %q", d.sent)
 			}
 		})
+	}
+}
+
+type aimCorrectionDevice struct {
+	fakeDevice
+	corrections int
+	stuck       bool
+	cancel      context.CancelFunc
+}
+
+func (d *aimCorrectionDevice) Send(ctx context.Context, command string) error {
+	var x, y int
+	n, _ := fmt.Sscanf(command, "move %d %d", &x, &y)
+	if n != 2 || y != 0 || x >= 0 || x == -Nudge {
+		return d.fakeDevice.Send(ctx, command)
+	}
+	d.corrections++
+	if d.stuck {
+		x = 0
+	}
+	err := d.fakeDevice.Send(ctx, fmt.Sprintf("move %d 0", x/2))
+	if d.cancel != nil {
+		d.cancel()
+	}
+	return err
+}
+
+func TestLiveAimConvergesWithTwoMeasuredCorrections(t *testing.T) {
+	d := &aimCorrectionDevice{}
+	p := newPointer(t, d, &fakeScreen{d: &d.fakeDevice})
+	p.RequireLive = true
+	p.Span = &Span{W: 420, H: 860}
+	if err := p.Tap(context.Background(), 0.5, 0.5, false, 1); err != nil {
+		t.Fatal(err)
+	}
+	if d.corrections != 2 || !slices.Contains(d.sent, "click") {
+		t.Fatalf("expected two corrections and one click: corrections=%d commands=%q", d.corrections, d.sent)
+	}
+}
+
+func TestLiveAimWillNotClickWhenCorrectionsFailOrAreCanceled(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		d := &aimCorrectionDevice{stuck: !canceled}
+		if canceled {
+			d.cancel = cancel
+		}
+		p := newPointer(t, d, &fakeScreen{d: &d.fakeDevice})
+		p.RequireLive = true
+		p.Span = &Span{W: 420, H: 860}
+		err := p.Tap(ctx, 0.5, 0.5, false, 1)
+		cancel()
+		if err == nil || slices.Contains(d.sent, "click") {
+			t.Fatalf("unverified pointer allowed a click: error=%v commands=%q", err, d.sent)
+		}
+		if canceled {
+			if d.corrections != 1 || !errors.Is(err, context.Canceled) {
+				t.Fatalf("continued after cancellation: corrections=%d error=%v", d.corrections, err)
+			}
+		} else if d.corrections != 3 || !strings.Contains(err.Error(), "observed (") || !strings.Contains(err.Error(), "residual ") {
+			t.Fatalf("failed correction budget or diagnostic: corrections=%d error=%v", d.corrections, err)
+		}
 	}
 }
