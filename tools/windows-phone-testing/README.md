@@ -1,10 +1,12 @@
-# Local Windows real-iPhone testing candidate 7
+# Local Windows real-iPhone testing candidate 8
+
+Candidate 8 aligns the live Home gesture with the upstream iPhone implementation: verified bottom-edge placement, bottom clamp, then one firmware `flick` command. It preserves cancellation/link checks and refuses unsupported firmware instead of falling back to the stroke that opened the app switcher. Candidate 7 verified a precise Search tap on the physical phone; text, Home and cold-start reliability remain unaccepted pending further live checks.
 
 Based on [ESP32 iPhone Agent](https://github.com/onehumanbeing/esp32-iphone-agent) by Henry Yuan. Retain the repository LICENSE and NOTICE when distributing. Public demonstrations should credit that project.
 
 This is a source bundle for the existing local prototype, not an accepted CP tool. The CLI uses a real ESP32 and iPhone; no simulator frames or paid Manina inference are used. The Manina iPhone app and compatible firmware remain prerequisites for mirroring. Codex account use is separate.
 
-Deploy these files together into a dedicated runtime directory. Create its `.venv` using Python 3.12 and install `bleak==3.1.0`; place FFmpeg 7.1 at `tools/ffmpeg.exe`. Build the repository CLI into `cli/esp32agent-local7.exe` with version `0.1.4-local-pointer7`. PowerShell 7 is required. The source bundle deliberately excludes executables, dependencies, phone images, device profiles, keys and session history. Board identity in the bridge/profile is specific to the currently tested board; provision another board deliberately rather than copying a private profile.
+Deploy these files together into a dedicated runtime directory. Create its `.venv` using Python 3.12 and install `bleak==3.1.0`; place FFmpeg 7.1 at `tools/ffmpeg.exe`. Build the repository CLI into `cli/esp32agent-local8.exe` with version `0.1.4-local-pointer8`. PowerShell 7 is required. The source bundle deliberately excludes executables, dependencies, phone images, device profiles, keys and session history. Board identity in the bridge/profile is specific to the currently tested board; provision another board deliberately rather than copying a private profile.
 
 `Start-Phone-Mcp.ps1` exposes the existing upstream MCP interface through a supervised exclusive session. `Test-Phone.ps1` checks readiness and captures evidence; adding `-RunHomeCheck` sends Home. These operations access the phone and require its availability and authorization. `Use-RealBoard.ps1` accepts CLI arguments only inside an owned session; do not bypass the supervisor. Do not run a separate viewer while an agent owns the phone. Automatic screenshot/action history is disabled; explicitly saved evidence remains private and should not be committed.
 

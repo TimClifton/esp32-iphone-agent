@@ -294,3 +294,60 @@ func TestLiveWiggleRejectsEarlyFramesAndRequiresReturn(t *testing.T) {
 		}
 	}
 }
+
+type homeFlickDevice struct {
+	fakeDevice
+	onClamp func() error
+}
+
+func (d *homeFlickDevice) Send(ctx context.Context, command string) error {
+	if err := d.fakeDevice.Send(ctx, command); err != nil {
+		return err
+	}
+	if command == "move 0 86" && d.onClamp != nil {
+		return d.onClamp()
+	}
+	return nil
+}
+
+func TestLiveHomeSwipeUsesOneAtomicFlick(t *testing.T) {
+	for _, mode := range []string{"ok", "move failure", "canceled", "unsupported flick"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			d := &homeFlickDevice{}
+			p := newPointer(t, d, &fakeScreen{d: &d.fakeDevice})
+			p.RequireLive = true
+			quality := 0.004
+			p.Span, p.Quality, p.link = &Span{400, 865}, &quality, d.Links()
+			switch mode {
+			case "move failure":
+				d.onClamp = func() error { return fmt.Errorf("clamp move failed") }
+			case "canceled":
+				d.onClamp = func() error { cancel(); return nil }
+			case "unsupported flick":
+				d.fail = map[string]bool{"flick": true}
+			}
+			err := p.HomeSwipe(ctx)
+			if (err == nil) != (mode == "ok") || p.pos != nil {
+				t.Fatalf("unexpected result: error=%v position=%v commands=%q", err, p.pos, d.sent)
+			}
+			if !slices.Contains(d.sent, "move 0 86") {
+				t.Fatalf("did not reach the verified home-bar clamp: %q", d.sent)
+			}
+			flicks := 0
+			for _, command := range d.sent {
+				switch command {
+				case "press", "release":
+					t.Fatalf("non-atomic home gesture sent %q: %q", command, d.sent)
+				case "flick 0 -735 40":
+					flicks++
+				}
+			}
+			wantFlick := mode == "ok" || mode == "unsupported flick"
+			if flicks > 1 || (flicks == 1) != wantFlick {
+				t.Fatalf("unexpected number of flicks: %q", d.sent)
+			}
+		})
+	}
+}

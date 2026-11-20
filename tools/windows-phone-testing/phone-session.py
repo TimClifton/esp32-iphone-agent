@@ -15,8 +15,8 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parent
 PROFILE = ROOT / 'real-board-state'
-CLI = ROOT / 'cli/esp32agent-local7.exe'
-VERSION = '0.1.4-local-pointer7'
+CLI = ROOT / 'cli/esp32agent-local8.exe'
+VERSION = '0.1.4-local-pointer8'
 LEASE_CONTEXT = 'IOS_LAB_PHONE_LEASE_CONTEXT'
 
 

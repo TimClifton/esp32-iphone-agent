@@ -805,7 +805,32 @@ func later(a, b time.Time) time.Time {
 // HomeSwipe is a real home-bar flick (a flick, not a rest: resting opens the app switcher).
 func (p *Pointer) HomeSwipe(ctx context.Context) error {
 	defer func() { p.pos = nil }() // edge clamping invalidates the tracked position
-	return p.Swipe(ctx, 0.5, 0.995, 0.5, 0.15, false)
+	if !p.RequireLive {
+		return p.Swipe(ctx, 0.5, 0.995, 0.5, 0.15, false)
+	}
+	if !p.CalibratedForLive() {
+		return errors.New("cannot verify the Home swipe without a verified pointer calibration")
+	}
+	link := p.dev.Links()
+	if err := p.ready(ctx, link); err != nil {
+		return err
+	}
+	if err := p.Point(ctx, 0.5, 0.995, true); err != nil {
+		return err
+	}
+	if err := p.ready(ctx, link); err != nil {
+		return err
+	}
+	// Push against the bottom edge to reach the home bar. Let the board
+	// press, move and release in one command so iOS sees a quick flick.
+	if err := p.send(ctx, "move 0 %d", p.Span.H/10); err != nil {
+		return err
+	}
+	if err := p.ready(ctx, link); err != nil {
+		return err
+	}
+	const homeFlickSpeed = 40
+	return p.send(ctx, "flick 0 %d %d", -int(math.Round(0.85*float64(p.Span.H))), homeFlickSpeed)
 }
 
 func (p *Pointer) dx(x float64) int {
