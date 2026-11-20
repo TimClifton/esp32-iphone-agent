@@ -39,21 +39,25 @@ type Conn struct {
 	statusAt      time.Time
 	videoStatusAt time.Time // when the board last provided both AirPlay and freeze state
 
-	re        *video.Reassembler
-	videoGen  int // changes when old decoder output must no longer be published
-	dec       *video.Decoder
-	ffmpeg    string
-	frame     image.Image
-	frameHash uint64
-	captured  time.Time  // when the board got the shown frame (local clock)
-	updated   time.Time  // when it was decoded here
-	changed   time.Time  // when the shown image last differed from the one before
-	offset    *int64     // local ms − board ms, the smallest seen (≈ the link latency)
-	config    []byte     // last SPS/PPS, for screencapture
-	gop       []video.AU // AUs since the last IDR, so a new screencapture starts at once
-	subs      map[chan video.AU]bool
-	frameSubs map[chan image.Image]bool
-	wake      chan struct{} // closed and replaced on every new frame
+	re               *video.Reassembler
+	videoGen         int // changes when old decoder output must no longer be published
+	restartingStream bool
+	streamPaused     bool
+	waitingForReplay bool
+	restartAfter     time.Time // successful stream-on acknowledgment in the current session
+	dec              *video.Decoder
+	ffmpeg           string
+	frame            image.Image
+	frameHash        uint64
+	captured         time.Time  // when the board got the shown frame (local clock)
+	updated          time.Time  // when it was decoded here
+	changed          time.Time  // when the shown image last differed from the one before
+	offset           *int64     // local ms − board ms, the smallest seen (≈ the link latency)
+	config           []byte     // last SPS/PPS, for screencapture
+	gop              []video.AU // AUs since the last IDR, so a new screencapture starts at once
+	subs             map[chan video.AU]bool
+	frameSubs        map[chan image.Image]bool
+	wake             chan struct{} // closed and replaced on every new frame
 
 	onApp      func() // the board said the app is using it
 	ptr        *pointer.Pointer
@@ -147,6 +151,8 @@ func (c *Conn) detach(s *proto.Session, why error) {
 // resetSessionVideo must hold mu. The new session needs its own status and board clock.
 func (c *Conn) resetSessionVideo() {
 	c.status, c.statusAt, c.videoStatusAt, c.offset = map[string]any{}, time.Time{}, time.Time{}, nil
+	c.restartingStream, c.streamPaused, c.waitingForReplay = false, false, false
+	c.restartAfter = time.Time{}
 	c.resetVideo()
 }
 
@@ -281,6 +287,9 @@ func (c *Conn) operationError(ctx context.Context, line string) error {
 	}
 	if c.sess == nil {
 		return proto.ErrSession
+	}
+	if line == "snap" && c.streamRestartOwnsReplay() {
+		return errStreamRestarting
 	}
 	binding, bound := ctx.Value(operationKey{}).(operationBinding)
 	if !bound {
@@ -419,7 +428,7 @@ func (c *Conn) learnClock(now time.Time, boardMs uint32) {
 func (c *Conn) onVideo(chunk []byte, gap bool, expected ...*proto.Session) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(expected) != 0 && c.sess != expected[0] {
+	if (c.streamPaused && !c.waitingForReplay) || (len(expected) != 0 && c.sess != expected[0]) {
 		return
 	}
 	if gap {
@@ -494,7 +503,7 @@ func (c *Conn) captureTime(generation int, ts uint32, now time.Time) time.Time {
 		return time.Time{}
 	}
 	captured := time.UnixMilli(int64(ts) + *c.offset)
-	if !currentVideoTime(now, captured) {
+	if !currentVideoTime(now, captured) || !captured.After(c.restartAfter) {
 		return time.Time{}
 	}
 	return captured
@@ -527,6 +536,7 @@ func (c *Conn) onFrame(generation int, f video.Frame) {
 		c.changed = now
 	}
 	c.frame, c.frameHash = f.Img, hash
+	c.waitingForReplay = false
 	for ch := range c.frameSubs {
 		select {
 		case ch <- f.Img:

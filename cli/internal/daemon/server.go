@@ -189,6 +189,8 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 		return ok(st)
 	case "screenshot":
 		return s.screenshot(ctx, c, req)
+	case "restart-stream":
+		return s.restartStream(ctx, c)
 	case "calibrate":
 		return s.calibrate(ctx, c)
 	case "tap", "longpress", "swipe", "text", "keys", "button":

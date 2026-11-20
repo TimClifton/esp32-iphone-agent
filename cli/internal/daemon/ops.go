@@ -25,12 +25,14 @@ import (
 )
 
 var (
-	errMirroring    = errors.New("screen mirroring is off: on the iPhone open Control Center > Screen Mirroring > ESP32 Agent")
-	errFrozen       = errors.New("video frozen: restart Screen Mirroring on the iPhone (Control Center > Screen Mirroring > Stop Mirroring, then ESP32 Agent)")
-	errVideoStatus  = errors.New("the board has not sent recent video status")
-	errVideoChanged = errors.New("video session changed; retry the screenshot")
-	errFrameLag     = errors.New("decoded screen has not caught up; wait and retry the screenshot")
-	errActionFrame  = errors.New("no fresh screen after the action; navigation result is unverified")
+	errMirroring        = errors.New("screen mirroring is off: on the iPhone open Control Center > Screen Mirroring > ESP32 Agent")
+	errFrozen           = errors.New("video frozen: restart Screen Mirroring on the iPhone (Control Center > Screen Mirroring > Stop Mirroring, then ESP32 Agent)")
+	errVideoStatus      = errors.New("the board has not sent recent video status")
+	errVideoChanged     = errors.New("video session changed; retry the screenshot")
+	errFrameLag         = errors.New("decoded screen has not caught up; wait and retry the screenshot")
+	errActionFrame      = errors.New("no fresh screen after the action; navigation result is unverified")
+	errStreamPaused     = errors.New("desktop video is paused; run device restart-stream again")
+	errStreamRestarting = errors.New("desktop video restart or replay is in progress; retry the screenshot")
 )
 
 func num(v any) float64 { f, _ := v.(float64); return f }
@@ -39,6 +41,9 @@ func num(v any) float64 { f, _ := v.(float64); return f }
 func (c *Conn) videoState(now time.Time) error {
 	if c.sess == nil {
 		return proto.ErrSession
+	}
+	if c.streamPaused {
+		return errStreamPaused
 	}
 	if !currentVideoTime(now, c.videoStatusAt) {
 		return errVideoStatus
@@ -100,7 +105,7 @@ func (s *Server) frame(ctx context.Context, c *Conn) (image.Image, error) {
 	}
 
 	c.mu.Lock()
-	waitingForDecoder := c.dec == nil && c.frame == nil
+	waitingForDecoder := c.dec == nil && c.frame == nil && !c.streamRestartOwnsReplay()
 	stateErr := c.videoState(time.Now())
 	sameVideo := c.videoGen == generation
 	afterAction = c.lastAction.After(c.lastShot)
@@ -126,6 +131,120 @@ func (s *Server) frame(ctx context.Context, c *Conn) (image.Image, error) {
 		return nil, errActionFrame
 	}
 	return img, err
+}
+
+// streamRestartOwnsReplay must hold mu.
+func (c *Conn) streamRestartOwnsReplay() bool {
+	return c.restartingStream || c.streamPaused || c.waitingForReplay
+}
+
+func (c *Conn) videoCursor(ctx context.Context) (following bool, err error) {
+	reply, err := c.Send(ctx, "vdbg")
+	if err != nil {
+		return false, err
+	}
+	for _, field := range strings.Fields(reply) {
+		switch field {
+		case "fg0":
+			return false, nil
+		case "fg1":
+			return true, nil
+		}
+	}
+	return false, errors.New("board did not report its desktop video cursor")
+}
+
+func (c *Conn) pauseDesktopStream(session *proto.Session) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess != session {
+		return false
+	}
+	c.streamPaused = true
+	c.waitingForReplay = false
+	c.signalVideo()
+	return true
+}
+
+func (s *Server) restartStream(ctx context.Context, c *Conn) Response {
+	ctx, done, err := c.beginOperation(ctx, false)
+	if err != nil {
+		return fail(err)
+	}
+	defer done()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	binding := ctx.Value(operationKey{}).(operationBinding)
+	c.mu.Lock()
+	if c.sess != binding.session {
+		c.mu.Unlock()
+		return fail(errVideoChanged)
+	}
+	c.restartingStream = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.sess == binding.session {
+			c.restartingStream = false
+		}
+		c.mu.Unlock()
+	}()
+
+	// A firmware without the cursor diagnostic may not provide a reliable
+	// restart barrier. Check before turning off the current stream.
+	if _, err := c.videoCursor(ctx); err != nil {
+		return fail(fmt.Errorf("desktop stream restart unavailable: %w", err))
+	}
+	if _, err := c.Send(ctx, "stream off"); err != nil {
+		if ctx.Err() != nil && c.pauseDesktopStream(binding.session) {
+			return fail(fmt.Errorf("desktop stream may be paused; retry device restart-stream: %w", err))
+		}
+		return fail(fmt.Errorf("desktop stream off was not confirmed: %w", err))
+	}
+	if !c.pauseDesktopStream(binding.session) {
+		return fail(errVideoChanged)
+	}
+	pausedCtx, pausedCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer pausedCancel()
+	for {
+		following, err := c.videoCursor(pausedCtx)
+		if err != nil {
+			return fail(fmt.Errorf("desktop stream paused, but cursor reset was not confirmed: %w", err))
+		}
+		if !following {
+			break
+		}
+		if err := sleepCtx(pausedCtx, 100*time.Millisecond); err != nil {
+			return fail(fmt.Errorf("desktop stream paused, but cursor reset was not confirmed: %w", err))
+		}
+	}
+	c.mu.Lock()
+	if err := c.operationError(ctx, "stream on"); err != nil {
+		c.mu.Unlock()
+		return fail(err)
+	}
+	c.resetVideo()
+	c.waitingForReplay = true // receive CONFIG/IDR, but don't publish before stream-on ACK
+	binding.generation = c.videoGen
+	c.mu.Unlock()
+
+	// With its cursor reset, the board automatically starts with CONFIG and
+	// the latest IDR. Asking for snap would replay that same GOP a second time.
+	ctx = context.WithValue(ctx, operationKey{}, binding)
+	if _, err := c.Send(ctx, "stream on"); err != nil {
+		c.pauseDesktopStream(binding.session)
+		return fail(fmt.Errorf("desktop stream on was not confirmed; retry device restart-stream: %w", err))
+	}
+	c.mu.Lock()
+	if c.sess != binding.session {
+		c.mu.Unlock()
+		return fail(errVideoChanged)
+	}
+	c.restartAfter = time.Now()
+	c.streamPaused = false
+	c.signalVideo()
+	c.mu.Unlock()
+	return ok(map[string]string{"message": "desktop stream restart requested; take a new screenshot to verify"})
 }
 
 func encode(img image.Image, format string, quality int, scale float64, maxSize int) ([]byte, image.Rectangle, error) {
