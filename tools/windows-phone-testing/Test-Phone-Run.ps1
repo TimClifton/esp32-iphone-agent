@@ -6,9 +6,14 @@ if ($LASTEXITCODE -ne 0 -or -not $basePython) { exit 1 }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $runFolder = Join-Path $PSScriptRoot ('phone-tests/' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Force $runFolder | Out-Null
-$infoRaw = & (Join-Path $PSScriptRoot 'Use-RealBoard.ps1') device info
-if ($LASTEXITCODE -ne 0) { throw 'Board status failed. No input was sent.' }
-$info = $infoRaw | ConvertFrom-Json
+$statusDeadline = (Get-Date).AddSeconds(10)
+do {
+    $infoRaw = & (Join-Path $PSScriptRoot 'Use-RealBoard.ps1') device info
+    if ($LASTEXITCODE -ne 0) { throw 'Board status failed. No input was sent.' }
+    $info = $infoRaw | ConvertFrom-Json
+    if ($null -ne $info.data.age_ms) { break }
+    Start-Sleep -Milliseconds 300
+} while ((Get-Date) -lt $statusDeadline)
 if ($info.status -ne 'ok' -or $info.data.ap -ne 'streaming' -or $info.data.fz -eq 1 -or
     $null -eq $info.data.age_ms -or $info.data.age_ms -lt 0 -or $info.data.age_ms -gt 2000 -or
     $info.data.hidm -ne 'ble' -or $info.data.hid -notin @('on','ok','connected')) {
