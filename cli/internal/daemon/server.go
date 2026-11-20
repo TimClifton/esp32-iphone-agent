@@ -163,7 +163,7 @@ func (s *Server) handle(nc net.Conn) {
 func (s *Server) Do(ctx context.Context, req Request) Response {
 	switch req.Cmd {
 	case "version":
-		return ok(map[string]string{"version": s.Version})
+		return ok(map[string]any{"version": s.Version, "pid": os.Getpid()})
 	case "stop":
 		return ok(map[string]string{"message": "daemon stopping"})
 	case "devices":
@@ -193,13 +193,8 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 		return s.calibrate(ctx, c)
 	case "tap", "longpress", "swipe", "text", "keys", "button":
 		return s.io(ctx, c, req)
-	case "send": // debugging: one raw board command; afterwards the pointer position is unknown
-		reply, err := c.Send(ctx, req.Text)
-		c.pointer(s.Dir).Forget()
-		if err != nil {
-			return fail(err)
-		}
-		return ok(map[string]string{"reply": reply})
+	case "send":
+		return s.rawSend(ctx, c, req.Text)
 	case "boardlog":
 		return s.boardLog(ctx, c)
 	case "net":
@@ -349,7 +344,7 @@ func (s *Server) conn(ctx context.Context, sel string) (*Conn, error) {
 func (s *Server) open(ctx context.Context, f ble.Found, sel string, l proto.Link) (*Conn, error) {
 	s.linkMu.Lock()
 	defer s.linkMu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, connectionTimeout())
 	defer cancel()
 	var err error
 	if l == nil {
@@ -407,7 +402,7 @@ func (s *Server) pair(ctx context.Context, sel string) Response {
 	if err != nil {
 		return fail(err)
 	}
-	pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	pctx, cancel := context.WithTimeout(ctx, connectionTimeout())
 	defer cancel()
 	s.linkMu.Lock()
 	l, err := s.Transport.Connect(pctx, f)
@@ -436,6 +431,19 @@ func (s *Server) pair(ctx context.Context, sel string) Response {
 		return fail(fmt.Errorf("paired, but the session failed: %w", err))
 	}
 	return ok(map[string]any{"id": c.ID, "name": c.Name, "message": "paired"})
+}
+
+// A process-backed BLE adapter includes driver discovery/service enumeration in
+// its handshake. Permit an explicitly bounded host-specific budget.
+func connectionTimeout() time.Duration {
+	if os.Getenv("ESP32AGENT_SIM") == "" {
+		return 15 * time.Second
+	}
+	d, err := time.ParseDuration(os.Getenv("ESP32AGENT_CONNECT_TIMEOUT"))
+	if err == nil && d >= 5*time.Second && d <= time.Minute {
+		return d
+	}
+	return 15 * time.Second
 }
 
 func (s *Server) unpair(sel string) Response {

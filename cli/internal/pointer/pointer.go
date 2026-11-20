@@ -76,11 +76,12 @@ type Pointer struct {
 	link   int
 	// where the pointer really landed (seen on screen) for the fraction aimed at, per axis; a line fit through
 	// them corrects every later move, so taps get better as the agent works
-	seen    map[string][][2]float64
-	Quality *float64 // pointer error at the last check, fraction of the screen
-	Aspect  *float64 // frame width / height when calibrated
-	Log     func(string)
-	Sleep   func(context.Context, time.Duration) error
+	seen        map[string][][2]float64
+	Quality     *float64 // pointer error at the last check, fraction of the screen
+	Aspect      *float64 // frame width / height when calibrated
+	RequireLive bool     // require observed pointer placement before coordinate input
+	Log         func(string)
+	Sleep       func(context.Context, time.Duration) error
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
@@ -117,6 +118,12 @@ func New(dev Device, screen Screen, file string) *Pointer {
 
 func (p *Pointer) Calibrated() bool { return p.Span != nil }
 
+func (p *Pointer) CalibratedForLive() bool {
+	return p.Calibrated() && p.Quality != nil && acceptableResidual(*p.Quality)
+}
+
+func acceptableResidual(e float64) bool { return e >= 0 && e <= AimTolerance }
+
 // Forget makes the position unknown (someone else moved the pointer): the next gesture homes first.
 func (p *Pointer) Forget() { p.pos = nil }
 
@@ -130,6 +137,10 @@ func (p *Pointer) remember(axis string, sample [2]float64) {
 
 // send runs one command; after a failed one the pointer position is unknown (the next gesture homes first).
 func (p *Pointer) send(ctx context.Context, format string, a ...any) error {
+	if err := ctx.Err(); err != nil {
+		p.pos = nil
+		return err
+	}
 	err := p.dev.Send(ctx, fmt.Sprintf(format, a...))
 	if err != nil {
 		p.pos = nil
@@ -151,6 +162,46 @@ var ErrNotFound = errors.New("calibration: pointer not found on screen (is the m
 
 // Calibrate finds the pointer on screen at two known distances from the corner and fits the mapping from both.
 func (p *Pointer) Calibrate(ctx context.Context) error {
+	if err := p.calibrate(ctx); err != nil {
+		return err
+	}
+	return p.save()
+}
+
+// CalibrateVerified stages the calibration in memory until a separate move
+// confirms it. Keep the last accepted calibration if the new one fails.
+func (p *Pointer) CalibrateVerified(ctx context.Context) (residual float64, err error) {
+	span, quality, aspect, seen := p.Span, p.Quality, p.Aspect, p.seen
+	defer func() {
+		if err != nil {
+			p.Span, p.Quality, p.Aspect, p.seen = span, quality, aspect, seen
+			p.pos = nil
+		}
+	}()
+	link := p.dev.Links()
+	if err := p.ready(ctx, link); err != nil {
+		return 0, err
+	}
+	if err := p.calibrate(ctx); err != nil {
+		return 0, err
+	}
+	e, found, err := p.verify(ctx, 0.5, 0.62)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, ErrNotFound
+	}
+	if !acceptableResidual(e) {
+		return 0, fmt.Errorf("calibration unverified: pointer missed the check point by %.1f%%", 100*e)
+	}
+	if err := p.ready(ctx, link); err != nil {
+		return 0, err
+	}
+	return e, p.save()
+}
+
+func (p *Pointer) calibrate(ctx context.Context) error {
 	p.pos = nil
 	if err := p.send(ctx, "home"); err != nil {
 		return err
@@ -205,7 +256,7 @@ func (p *Pointer) Calibrate(ctx context.Context) error {
 		p.remember("y", [2]float64{float64(f.units) / float64(s.H), f.y})
 	}
 	p.Log(fmt.Sprintf("calibration: span %d x %d", s.W, s.H))
-	return p.save()
+	return nil
 }
 
 // findPointer wiggles the pointer and finds it anywhere on screen (the span may still be unknown).
@@ -268,13 +319,17 @@ var ErrNotCalibrated = errors.New("pointer not calibrated")
 
 // Point moves the pointer to x, y. aim: find it on screen afterwards and fix a miss (slower).
 func (p *Pointer) Point(ctx context.Context, x, y float64, aim bool) error {
+	return p.point(ctx, x, y, aim || p.RequireLive)
+}
+
+func (p *Pointer) point(ctx context.Context, x, y float64, aim bool) error {
 	if !p.Calibrated() {
 		return ErrNotCalibrated
 	}
 	if err := p.moveTo(ctx, p.dx(x), p.dy(y), true); err != nil {
 		return err
 	}
-	if aim && p.screen != nil {
+	if aim && (p.screen != nil || p.RequireLive) {
 		return p.aim(ctx, x, y)
 	}
 	return nil
@@ -282,13 +337,17 @@ func (p *Pointer) Point(ctx context.Context, x, y float64, aim bool) error {
 
 // aim is the closed loop: find the real pointer on screen, fix a miss, and learn the error for later moves.
 func (p *Pointer) aim(ctx context.Context, x, y float64) error {
+	link := p.link
+	if p.screen == nil || !p.screen.Live() || p.dev.Links() != link {
+		return errors.New("pointer verification lost its live connection; no click sent")
+	}
 	found, ok, err := p.measure(ctx, x, y)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		p.Log(fmt.Sprintf("aim (%.3f, %.3f): pointer not found", x, y))
-		return nil
+		return ErrNotFound
 	}
 	if math.Max(math.Abs(found.X-x), math.Abs(found.Y-y)) <= MaxMiss { // learn from normal drift only
 		p.remember("x", [2]float64{p.Fix(x, "x"), found.X})
@@ -296,6 +355,9 @@ func (p *Pointer) aim(ctx context.Context, x, y float64) error {
 		p.save()
 	}
 	if math.Abs(found.X-x) <= AimTolerance && math.Abs(found.Y-y) <= AimTolerance {
+		if !p.screen.Live() || p.dev.Links() != link {
+			return errors.New("connection changed during pointer verification; no click sent")
+		}
 		return nil
 	}
 	mx := int(math.RoundToEven((x - found.X) * float64(p.Span.W)))
@@ -305,6 +367,17 @@ func (p *Pointer) aim(ctx context.Context, x, y float64) error {
 	}
 	if p.pos != nil {
 		p.pos = &[2]int{p.pos[0] + mx, p.pos[1] + my}
+	}
+	p.screen.Settled(ctx, 300*time.Millisecond, 800*time.Millisecond, 1500*time.Millisecond)
+	verified, visible, err := p.measure(ctx, x, y)
+	if err != nil {
+		return err
+	}
+	if !visible {
+		return ErrNotFound
+	}
+	if !p.screen.Live() || p.dev.Links() != link || math.Abs(verified.X-x) > AimTolerance || math.Abs(verified.Y-y) > AimTolerance {
+		return errors.New("corrected pointer position is unverified; no click sent")
 	}
 	return nil
 }
@@ -319,6 +392,9 @@ func (p *Pointer) measure(ctx context.Context, x, y float64) (Point, bool, error
 		nudge = -Nudge
 	}
 	p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond) // pointer at rest
+	if p.RequireLive && !p.screen.Live() {
+		return Point{}, false, errors.New("live screen lost during pointer measurement")
+	}
 	before, sent := p.screen.Frame(), time.Now()
 	if err := p.send(ctx, "move %d 0", nudge); err != nil {
 		return Point{}, false, err
@@ -326,7 +402,11 @@ func (p *Pointer) measure(ctx context.Context, x, y float64) (Point, bool, error
 	after := p.screen.Fresh(ctx, sent, 1200*time.Millisecond)
 	if after != nil {
 		p.screen.Settled(ctx, 100*time.Millisecond, 50*time.Millisecond, 400*time.Millisecond)
-		after = p.screen.Frame()
+		if p.RequireLive {
+			after = p.screen.Fresh(ctx, sent, 1200*time.Millisecond)
+		} else {
+			after = p.screen.Frame()
+		}
 	}
 	if err := p.send(ctx, "move %d 0", -nudge); err != nil {
 		return Point{}, false, err
@@ -341,7 +421,15 @@ func (p *Pointer) measure(ctx context.Context, x, y float64) (Point, bool, error
 
 // Verify moves to a known point and measures the miss (fraction of the screen); ok=false: pointer not found.
 func (p *Pointer) Verify(ctx context.Context, x, y float64) (float64, bool, error) {
-	if err := p.Point(ctx, x, y, false); err != nil {
+	e, found, err := p.verify(ctx, x, y)
+	if err != nil || !found {
+		return e, found, err
+	}
+	return e, true, p.save()
+}
+
+func (p *Pointer) verify(ctx context.Context, x, y float64) (float64, bool, error) {
+	if err := p.point(ctx, x, y, false); err != nil {
 		return 0, false, err
 	}
 	found, ok, err := p.measure(ctx, x, y)
@@ -350,7 +438,7 @@ func (p *Pointer) Verify(ctx context.Context, x, y float64) (float64, bool, erro
 	}
 	e := math.Max(math.Abs(found.X-x), math.Abs(found.Y-y))
 	p.Quality = &e
-	return e, true, p.save()
+	return e, true, nil
 }
 
 // Drift is how far the learned correction has moved targets away from the plain calibration.
@@ -391,6 +479,18 @@ func (p *Pointer) Fix(t float64, axis string) float64 {
 	b := mf - a*mc
 	if math.Abs(b) < 0.1 {
 		return (t - b) / a
+	}
+	// Some BLE HID configurations retain a substantial origin offset after homing.
+	// Accept it only when well-separated observations agree on one near-unit mapping.
+	if math.Abs(b) < 0.25 && len(pts) >= 2 && a > 0.95 && a < 1.05 {
+		lo, hi, residual := pts[0][0], pts[0][0], 0.0
+		for _, sample := range pts {
+			lo, hi = math.Min(lo, sample[0]), math.Max(hi, sample[0])
+			residual = math.Max(residual, math.Abs(sample[1]-(a*sample[0]+b)))
+		}
+		if hi-lo >= 0.2 && residual <= 0.015 {
+			return (t - b) / a
+		}
 	}
 	return t
 }
@@ -448,10 +548,25 @@ func (p *Pointer) Reset(ctx context.Context) error {
 
 // Tap clicks count times (at least once) at x, y without moving in between: 2 is a double tap.
 func (p *Pointer) Tap(ctx context.Context, x, y float64, aim bool, count int) error {
+	link := p.dev.Links()
+	if err := p.ready(ctx, link); err != nil {
+		return err
+	}
 	if err := p.Point(ctx, x, y, aim); err != nil {
 		return err
 	}
+	// iOS animates pointer corrections after the board acknowledges the move.
+	// A click before that animation settles can hit the previous position.
+	if p.screen != nil && p.screen.Live() {
+		p.screen.Settled(ctx, 300*time.Millisecond, 800*time.Millisecond, 1500*time.Millisecond)
+	}
 	for i := 0; i < max(count, 1); i++ {
+		if err := p.ready(ctx, link); err != nil {
+			return err
+		}
+		if p.screen != nil && !p.screen.Live() {
+			return errors.New("live screen lost before click")
+		}
 		if err := p.send(ctx, "click"); err != nil {
 			return err
 		}
@@ -459,19 +574,55 @@ func (p *Pointer) Tap(ctx context.Context, x, y float64, aim bool, count int) er
 	return p.Sleep(ctx, TapGap)
 }
 
-// LongPress presses at x, y for d without moving.
-func (p *Pointer) LongPress(ctx context.Context, x, y float64, d time.Duration) error {
+func (p *Pointer) ready(ctx context.Context, link int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.dev.Links() != link {
+		return errors.New("connection changed during pointer operation")
+	}
+	if p.RequireLive && (p.screen == nil || !p.screen.Live()) {
+		return errors.New("live screen lost during pointer operation")
+	}
+	if checked, ok := p.dev.(interface{ CheckOperation(context.Context) error }); ok {
+		return checked.CheckOperation(ctx)
+	}
+	return nil
+}
+
+func (p *Pointer) pressAt(ctx context.Context, x, y float64, link int, held func() error) (err error) {
+	if err := p.ready(ctx, link); err != nil {
+		return err
+	}
 	if err := p.Point(ctx, x, y, false); err != nil {
 		return err
 	}
+	if p.RequireLive {
+		p.screen.Settled(ctx, 300*time.Millisecond, 800*time.Millisecond, 1500*time.Millisecond)
+	}
+	if err := p.ready(ctx, link); err != nil {
+		return err
+	}
+	defer func() {
+		if p.dev.Links() != link {
+			if err == nil {
+				err = errors.New("connection changed before the gesture could be released")
+			}
+			return
+		}
+		if rerr := p.send(context.WithoutCancel(ctx), "release"); err == nil {
+			err = rerr
+		}
+	}()
 	if err := p.send(ctx, "press"); err != nil {
 		return err
 	}
-	err := p.Sleep(ctx, d)
-	if rerr := p.send(context.WithoutCancel(ctx), "release"); err == nil {
-		err = rerr
-	}
-	return err
+	return held()
+}
+
+// LongPress presses at x, y for d without moving.
+func (p *Pointer) LongPress(ctx context.Context, x, y float64, d time.Duration) error {
+	return p.pressAt(ctx, x, y, p.dev.Links(), func() error { return p.Sleep(ctx, d) })
 }
 
 func (p *Pointer) Swipe(ctx context.Context, x1, y1, x2, y2 float64, hold bool) error {
@@ -481,14 +632,15 @@ func (p *Pointer) Swipe(ctx context.Context, x1, y1, x2, y2 float64, hold bool) 
 // Drag presses at the first point, moves through the rest, releases: one continuous stroke. hold rests at the
 // end first, so lists and pickers stop exactly there; system gestures (home, back) need the flick.
 func (p *Pointer) Drag(ctx context.Context, pts []Point, hold bool) error {
-	if err := p.Point(ctx, pts[0].X, pts[0].Y, false); err != nil {
-		return err
+	if len(pts) < 2 {
+		return errors.New("drag requires at least two points")
 	}
-	if err := p.send(ctx, "press"); err != nil {
-		return err
-	}
-	err := func() error {
+	link := p.dev.Links()
+	return p.pressAt(ctx, pts[0].X, pts[0].Y, link, func() error {
 		for _, pt := range pts[1:] {
+			if err := p.ready(ctx, link); err != nil {
+				return err
+			}
 			if err := p.moveTo(ctx, p.dx(pt.X), p.dy(pt.Y), false); err != nil { // never home mid-drag
 				return err
 			}
@@ -497,11 +649,7 @@ func (p *Pointer) Drag(ctx context.Context, pts []Point, hold bool) error {
 			return p.Sleep(ctx, Hold)
 		}
 		return nil
-	}()
-	if rerr := p.send(context.WithoutCancel(ctx), "release"); err == nil {
-		err = rerr
-	}
-	return err
+	})
 }
 
 // Type types text as the board can (see Typeable).
@@ -534,10 +682,14 @@ func (p *Pointer) Key(ctx context.Context, combo string) error { return p.send(c
 // up from the home bar, each until the screen really changes. The board acknowledges a key iOS ignores (seen on
 // an iPhone in a video app, 2026-10-21), so an "ok" alone proves nothing; without video the key's "ok" is all there is.
 func (p *Pointer) GoHome(ctx context.Context) error {
+	link := p.dev.Links()
 	tries := []func() error{
 		func() error { return p.send(ctx, "homescreen") },
 		func() error { return p.Key(ctx, "cmd+h") },
 		func() error {
+			if p.RequireLive && !p.CalibratedForLive() {
+				return errors.New("cannot verify the Home swipe without a verified pointer calibration")
+			}
 			if !p.Calibrated() {
 				if err := p.Calibrate(ctx); err != nil {
 					return err
@@ -548,7 +700,13 @@ func (p *Pointer) GoHome(ctx context.Context) error {
 	}
 	var last error
 	for i, try := range tries {
+		if err := p.ready(ctx, link); err != nil {
+			return err
+		}
 		before, sent := p.frame(), time.Now()
+		if p.RequireLive && before == nil {
+			return errors.New("live screen lost before Home input")
+		}
 		err := try()
 		if err != nil && strings.HasPrefix(err.Error(), "busy") {
 			return err
@@ -557,7 +715,7 @@ func (p *Pointer) GoHome(ctx context.Context) error {
 			return nil // no video to check against: trust the Home key, and after Cmd+H still flick (as before)
 		}
 		if err == nil && before != nil && p.changedSince(ctx, before, sent) {
-			return nil
+			return p.ready(ctx, link)
 		}
 		last = err
 	}
@@ -606,9 +764,10 @@ func (p *Pointer) HomeSwipe(ctx context.Context) error {
 }
 
 func (p *Pointer) dx(x float64) int {
-	return int(math.RoundToEven(math.Min(math.Max(p.Fix(x, "x"), 0), 1) * float64(p.Span.W)))
+	// A corrected origin may require moving left of the firmware's home position.
+	return int(math.RoundToEven(math.Min(math.Max(p.Fix(x, "x"), -0.25), 1.25) * float64(p.Span.W)))
 }
 
 func (p *Pointer) dy(y float64) int {
-	return int(math.RoundToEven(math.Min(math.Max(p.Fix(y, "y"), 0), 1) * float64(p.Span.H)))
+	return int(math.RoundToEven(math.Min(math.Max(p.Fix(y, "y"), -0.25), 1.25) * float64(p.Span.H)))
 }

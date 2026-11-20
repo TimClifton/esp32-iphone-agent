@@ -28,7 +28,11 @@ func (s *Sim) Scan(ctx context.Context, d time.Duration) ([]Found, error) {
 	if _, err := os.Stat(s.Bin); err != nil {
 		return nil, err
 	}
-	return []Found{{Name: "ESP32 Agent 6AD5", Addr: "sim"}}, nil
+	name, address := os.Getenv("ESP32AGENT_PIPE_NAME"), "pipe"
+	if name == "" {
+		name, address = "ESP32 Agent 6AD5", "sim"
+	}
+	return []Found{{Name: name, Addr: address}}, nil
 }
 
 func (s *Sim) Connect(ctx context.Context, f Found) (proto.Link, error) {

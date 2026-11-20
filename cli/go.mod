@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/mozillazg/go-pinyin v0.21.0
 	golang.org/x/image v0.47.0
+	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 	golang.org/x/text v0.43.0
 	tinygo.org/x/bluetooth v0.17.0
@@ -21,6 +22,5 @@ require (
 	github.com/tinygo-org/cbgo v0.1.0 // indirect
 	github.com/tinygo-org/pio v0.3.0 // indirect
 	golang.org/x/exp v0.0.0-20260727155853-b88d891fe743 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	tinygo.org/x/espradio v0.5.0 // indirect
 )

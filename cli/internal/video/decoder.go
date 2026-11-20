@@ -48,7 +48,7 @@ func FFmpeg() (string, error) {
 }
 
 // NewDecoder starts ffmpeg; onFrame gets every decoded picture until Close.
-func NewDecoder(ffmpeg string, onFrame func(Frame)) (*Decoder, error) {
+func NewDecoder(ffmpeg string, onFrame func(Frame), accept ...func(uint32) bool) (*Decoder, error) {
 	// Room for a whole GOP (the board's holds up to 8192 AUs): a new stream starts with it at once, and over Wi-Fi it
 	// arrives faster than ffmpeg decodes. 256 overflowed there and the stream waited minutes for the next IDR (2026-11-06).
 	d := &Decoder{queue: make(chan AU, 8192), done: make(chan struct{})}
@@ -70,12 +70,18 @@ func NewDecoder(ffmpeg string, onFrame func(Frame)) (*Decoder, error) {
 	go func() {
 		r := bufio.NewReaderSize(out, 1<<20)
 		for {
-			raw, err := readBMP(r)
+			var ts uint32
+			raw, err := readBMP(r, func() bool {
+				ts = d.popTS()
+				return len(accept) == 0 || accept[0](ts)
+			})
 			if err != nil {
 				break
 			}
+			if raw == nil {
+				continue
+			} // consume old GOP pictures without expanding or publishing them
 			img, err := bmp.Decode(bytes.NewReader(raw))
-			ts := d.popTS()
 			if err == nil {
 				onFrame(Frame{Img: img, TS: ts})
 			}
@@ -107,9 +113,8 @@ func (d *Decoder) feed() {
 		} else {
 			d.mu.Lock()
 			d.ts = append(d.ts, au.TS)
-			if len(d.ts) > 30 { // a picture ffmpeg dropped would skew every later time; never by much
-				d.ts = d.ts[len(d.ts)-30:]
-			}
+			// Preserve FIFO timestamps while a cached GOP catches up. Discarding the
+			// oldest timestamps labels old pictures as newly captured frames.
 			d.mu.Unlock()
 		}
 		// The trailing delimiter ends the AU for ffmpeg's parser, which otherwise holds it until the next one starts.
@@ -147,7 +152,7 @@ func (d *Decoder) Close() {
 var aud = []byte{0, 0, 0, 1, 9, 0xf0} // access unit delimiter NAL
 
 // readBMP reads one BMP file from a stream of concatenated BMPs.
-func readBMP(r *bufio.Reader) ([]byte, error) {
+func readBMP(r *bufio.Reader, keep ...func() bool) ([]byte, error) {
 	hdr := make([]byte, 6)
 	if _, err := io.ReadFull(r, hdr); err != nil {
 		return nil, err
@@ -155,6 +160,10 @@ func readBMP(r *bufio.Reader) ([]byte, error) {
 	n := binary.LittleEndian.Uint32(hdr[2:])
 	if string(hdr[:2]) != "BM" || n < 54 || n > 64<<20 {
 		return nil, errors.New("not a BMP stream")
+	}
+	if len(keep) != 0 && !keep[0]() {
+		_, err := io.CopyN(io.Discard, r, int64(n)-6)
+		return nil, err
 	}
 	buf := make([]byte, n)
 	copy(buf, hdr)

@@ -11,43 +11,64 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"math"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/pointer"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/proto"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/video"
 	"golang.org/x/image/draw"
 )
 
 var (
-	errMirroring = errors.New("screen mirroring is off: on the iPhone open Control Center > Screen Mirroring > ESP32 Agent")
-	errFrozen    = errors.New("video frozen: restart Screen Mirroring on the iPhone (Control Center > Screen Mirroring > Stop Mirroring, then ESP32 Agent)")
+	errMirroring    = errors.New("screen mirroring is off: on the iPhone open Control Center > Screen Mirroring > ESP32 Agent")
+	errFrozen       = errors.New("video frozen: restart Screen Mirroring on the iPhone (Control Center > Screen Mirroring > Stop Mirroring, then ESP32 Agent)")
+	errVideoStatus  = errors.New("the board has not sent recent video status")
+	errVideoChanged = errors.New("video session changed; retry the screenshot")
+	errFrameLag     = errors.New("decoded screen has not caught up; wait and retry the screenshot")
+	errActionFrame  = errors.New("no fresh screen after the action; navigation result is unverified")
 )
 
 func num(v any) float64 { f, _ := v.(float64); return f }
 
-// videoState explains why there is no usable screen, nil when mirroring streams.
-func (s *Server) videoState(ctx context.Context, c *Conn) error {
-	for i := 0; i < 30; i++ { // the first status arrives within a second of connecting
-		if _, age := c.Status(); age >= 0 {
-			break
-		}
-		if sleepCtx(ctx, 100*time.Millisecond) != nil {
-			return ctx.Err()
-		}
+// videoState explains why there is no usable screen, nil when mirroring streams. It must hold mu.
+func (c *Conn) videoState(now time.Time) error {
+	if c.sess == nil {
+		return proto.ErrSession
 	}
-	st, _ := c.Status()
-	if num(st["fz"]) == 1 {
-		return errFrozen
+	if !currentVideoTime(now, c.videoStatusAt) {
+		return errVideoStatus
 	}
-	if st["ap"] != "streaming" {
+	if c.status["ap"] != "streaming" {
 		return errMirroring
 	}
-	c.mu.Lock()
-	ff := c.ffmpeg
-	c.mu.Unlock()
+	if c.status["fz"] != float64(0) {
+		return errFrozen
+	}
+	return nil
+}
+
+func (s *Server) videoState(ctx context.Context, c *Conn) error {
+	var ff string
+	for i := 0; ; i++ { // the first status arrives within a second of connecting
+		c.mu.Lock()
+		err := c.videoState(time.Now())
+		ff = c.ffmpeg
+		c.mu.Unlock()
+		if err == nil {
+			break
+		}
+		if err != errVideoStatus || i == 30 {
+			return err
+		}
+		if err := sleepCtx(ctx, 100*time.Millisecond); err != nil {
+			return err
+		}
+	}
 	if ff == "" {
 		_, err := video.FFmpeg()
 		if err == nil {
@@ -63,32 +84,48 @@ func (s *Server) frame(ctx context.Context, c *Conn) (image.Image, error) {
 	if err := s.videoState(ctx, c); err != nil {
 		return nil, err
 	}
-	if c.Frame() == nil && c.Fresh(ctx, time.Time{}, 6*time.Second) == nil {
-		// nothing streamed yet (the stream starts at the next keyframe): ask for the current GOP
+	c.mu.Lock()
+	generation := c.videoGen
+	afterAction := c.lastAction.After(c.lastShot)
+	c.mu.Unlock()
+	if binding, ok := ctx.Value(operationKey{}).(operationBinding); ok {
+		generation = binding.generation
+	}
+	if afterAction {
+		c.Settled(ctx, 500*time.Millisecond, 300*time.Millisecond, 3*time.Second)
+	}
+	img, err := c.waitFrame(ctx, generation, time.Time{}, 5*time.Second, true)
+	if err != errFrameLag {
+		return img, err
+	}
+
+	c.mu.Lock()
+	waitingForDecoder := c.dec == nil && c.frame == nil
+	stateErr := c.videoState(time.Now())
+	sameVideo := c.videoGen == generation
+	afterAction = c.lastAction.After(c.lastShot)
+	c.mu.Unlock()
+	if stateErr != nil {
+		return nil, stateErr
+	}
+	if !sameVideo {
+		return nil, errVideoChanged
+	}
+	if waitingForDecoder {
+		// Nothing streamed yet. Ask for the current GOP only if a decoder
+		// isn't already replaying it.
 		sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		_, err := c.Send(sctx, "snap")
+		_, err = c.Send(sctx, "snap")
 		cancel()
 		if err != nil {
 			return nil, fmt.Errorf("no video from the board: %w", err)
 		}
-		if c.Fresh(ctx, time.Time{}, 5*time.Second) == nil {
-			return nil, errors.New("no video from the board yet; try again")
-		}
+		img, err = c.waitFrame(ctx, generation, time.Time{}, 5*time.Second, true)
 	}
-	c.mu.Lock()
-	acted, shot := c.lastAction, c.lastShot
-	c.mu.Unlock()
-	if acted.After(shot) {
-		c.Settled(ctx, 500*time.Millisecond, 300*time.Millisecond, 3*time.Second)
-		c.Fresh(ctx, acted, 1500*time.Millisecond)
+	if err == errFrameLag && afterAction {
+		return nil, errActionFrame
 	}
-	c.mu.Lock()
-	c.lastShot = time.Now()
-	c.mu.Unlock()
-	if st, _ := c.Status(); num(st["fz"]) == 1 {
-		return nil, errFrozen
-	}
-	return c.Frame(), nil
+	return img, err
 }
 
 func encode(img image.Image, format string, quality int, scale float64, maxSize int) ([]byte, image.Rectangle, error) {
@@ -148,7 +185,30 @@ func (c *Conn) pointer(dir string) *pointer.Pointer {
 	return c.ptr
 }
 
-// size is the screenshot size coordinates refer to: the latest frame, else the AirPlay resolution.
+func requireLive() bool { return os.Getenv("ESP32AGENT_REQUIRE_LIVE") == "1" }
+
+func (s *Server) rawSend(ctx context.Context, c *Conn, command string) Response {
+	if requireLive() {
+		if command != "vdbg" {
+			return fail(errors.New("raw board commands are disabled in the live phone testing profile"))
+		}
+	} else {
+		op, done, err := c.beginOperation(ctx, false)
+		if err != nil {
+			return fail(err)
+		}
+		defer done()
+		defer c.pointer(s.Dir).Forget()
+		ctx = op
+	}
+	reply, err := c.Send(ctx, command)
+	if err != nil {
+		return fail(err)
+	}
+	return ok(map[string]string{"reply": reply})
+}
+
+// size provides the screen dimensions for recorded action metadata.
 func (c *Conn) size() (float64, float64, error) {
 	if f := c.Frame(); f != nil {
 		return float64(f.Bounds().Dx()), float64(f.Bounds().Dy()), nil
@@ -161,32 +221,67 @@ func (c *Conn) size() (float64, float64, error) {
 }
 
 func (s *Server) calibrate(ctx context.Context, c *Conn) Response {
-	if err := s.videoState(ctx, c); err != nil {
+	ctx, done, err := c.beginOperation(ctx, true)
+	if err != nil {
 		return fail(err)
 	}
+	defer done()
 	if _, err := s.frame(ctx, c); err != nil {
 		return fail(err)
 	}
 	p := c.pointer(s.Dir)
+	p.RequireLive = requireLive()
+	if p.RequireLive {
+		residual, err := p.CalibrateVerified(ctx)
+		c.noteAction()
+		if err != nil {
+			return fail(err)
+		}
+		return ok(map[string]any{"span": map[string]int{"w": p.Span.W, "h": p.Span.H}, "error": residual})
+	}
 	if err := p.Calibrate(ctx); err != nil {
+		c.noteAction()
 		return fail(err)
 	}
 	out := map[string]any{"span": map[string]int{"w": p.Span.W, "h": p.Span.H}}
 	if e, found, err := p.Verify(ctx, 0.5, 0.62); err == nil && found {
 		out["error"] = e // miss at a check point, fraction of the screen
 	}
+	c.noteAction()
+	return ok(out)
+}
+
+func (c *Conn) noteAction() {
 	c.mu.Lock()
 	c.lastAction = time.Now()
 	c.mu.Unlock()
-	return ok(out)
 }
 
 // textChunk keeps one `type` line well inside a single BLE write.
 const textChunk = 160
 
 func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
+	live := requireLive()
+	coordinates := req.Cmd == "tap" || req.Cmd == "longpress" || req.Cmd == "swipe"
+	ctx, done, err := c.beginOperation(ctx, live || coordinates)
+	if err != nil {
+		return fail(err)
+	}
+	defer done()
+	var img image.Image
+	if live || coordinates {
+		if img, err = s.frame(ctx, c); err != nil {
+			return fail(err)
+		}
+	}
+	if coordinates {
+		if err := validateCoordinates(req, img.Bounds()); err != nil {
+			return fail(err)
+		}
+	}
 	p := c.pointer(s.Dir)
-	err := func() error {
+	p.RequireLive = live
+	err = func() error {
 		switch req.Cmd {
 		case "text":
 			typed, err := "", error(nil)
@@ -210,14 +305,12 @@ func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
 			}
 			return p.GoHome(ctx)
 		}
-		w, h, err := c.size()
-		if err != nil {
-			return err
-		}
-		if !p.Calibrated() {
-			if s.videoState(ctx, c) != nil {
-				return errors.New("pointer not calibrated, and the screen is not visible: turn on Screen Mirroring, then run esp32agent calibrate")
+		w, h := float64(img.Bounds().Dx()), float64(img.Bounds().Dy())
+		if live && !p.CalibratedForLive() {
+			if _, err := p.CalibrateVerified(ctx); err != nil {
+				return err
 			}
+		} else if !p.Calibrated() {
 			if err := p.Calibrate(ctx); err != nil {
 				return err
 			}
@@ -241,9 +334,7 @@ func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
 		}
 		return nil
 	}()
-	c.mu.Lock()
-	c.lastAction = time.Now()
-	c.mu.Unlock()
+	c.noteAction()
 	s.recordAction(c, req, err)
 	if err != nil {
 		return fail(err)
@@ -254,6 +345,23 @@ func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
 		out["note"] = "needs the iPhone's Chinese (pinyin) keyboard; if letters appear, tap the globe key and type again"
 	}
 	return ok(out)
+}
+
+func validateCoordinates(req Request, bounds image.Rectangle) error {
+	expected := 2
+	if req.Cmd == "swipe" {
+		expected = 4
+	}
+	if len(req.Pts) != expected {
+		return errors.New("wrong number of screen coordinates")
+	}
+	limits := [2]float64{float64(bounds.Dx()), float64(bounds.Dy())}
+	for i, value := range req.Pts {
+		if math.IsNaN(value) || value < 0 || value >= limits[i%2] {
+			return errors.New("screen coordinates must be finite and within the current image")
+		}
+	}
+	return nil
 }
 
 // screencapture streams raw H.264 (Annex-B, from the next keyframe) or MJPEG, after one JSON header line.
