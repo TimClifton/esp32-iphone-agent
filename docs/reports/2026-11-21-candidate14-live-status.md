@@ -26,6 +26,8 @@ The supervised console was released with an empty line and exited 0. Its control
 
 Source commit `ec94528` additionally corrects Home reporting: a changed screen returns an unverified-destination error and stops fallbacks; pointer regressions and vet passed. It is pushed but has not been rebuilt into candidate14 or live-tested. Do not confuse the active candidate14 results with that newer source change.
 
+After the owner restarted phone-side Screen Mirroring, a new supervised session connected and captured the expected Accessibility page. Fresh status showed `fz=0`, GOP333525, 164 picture AUs /164 BMPs /zero pending, with a 71ms published-frame age; a pointer-only refresh passed. Manual recovery therefore passed. Automatic recovery remains unsupported for this board freeze. The session exited0 and the controller process was absent after release. No phone-side input was sent in this recovery session except the explicitly bounded pointer refresh.
+
 Verify reliable Home via an observed route, targeted navigation with the contrasting pointer, visible bounded wheel scrolling, current-runtime stream recovery, and clean release. Do not add an application-specific journey as a gate. Do not claim generic acceptance, CP migration, CP installation or an upstream merge before those results exist.
 
 The small model-tier check is in `2026-11-20-phone-tool-tier-check.md`: deterministic mechanics require no model; Luna passed simple state/text checks and Terra passed visual interpretation. No billing evidence establishes an absolute cheapest model.
